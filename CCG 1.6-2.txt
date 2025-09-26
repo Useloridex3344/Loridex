@@ -1,0 +1,1867 @@
+-- Loridex.client.lua (LocalScript)
+-- Full UI + all highlighters + dispatcher in one file.
+-- Place in StarterPlayer/StarterPlayerScripts.
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local TextService = game:GetService("TextService")
+local TextChatService = game:GetService("TextChatService")
+
+local localPlayer = Players.LocalPlayer
+
+-- ==== CONFIG ====
+local HOTKEY = Enum.KeyCode.H
+local START_OPEN = true
+
+-- Panel
+local EXPANDED_WIDTH = 570
+local PANEL_HEIGHT = 250  -- extra height to fit Host/Co-Host bar
+
+-- Sidebar + layout
+local SIDEBAR_WIDTH = 180
+local ROW_HEIGHT = 36
+local CONTENT_TOP_PAD = 8
+local CONTENT_ITEM_GAP = 8
+
+-- Switch & label layout
+local SWITCH_SIZE = Vector2.new(56, 28)
+local FIRST_SWITCH_X = 8
+local SWITCH_GAP = 6
+local LABEL_GAP = 10
+local SECOND_SWITCH_SHIFT = -6
+
+local SWITCH_COL_WIDTH = 260
+local FORM_LABEL_WIDTH = 120
+local CHAIN_LABEL_WIDTH = 130
+
+-- Title + icon layout
+local TITLE_TEXT = "Loridèx"
+local TITLE_SIZE = 18
+local TITLE_FONT = Enum.Font.GothamMedium
+local TITLEBAR_HEIGHT = 36
+local ICON_SIZE = 18
+local ICON_GAP = 6
+
+-- Bottom picker bar
+local BOTTOMBAR_HEIGHT = 56
+local DROPDOWN_ITEM_HEIGHT = 26
+local DROPDOWN_MAX_VISIBLE = 6
+-- =================
+
+-- ====== Selection state (Host / Co-Host) ======
+local Selection = {
+	hostUserId = nil,
+	cohostUserId = nil,
+}
+
+local function isHighlightingEnabled()
+	return Selection.hostUserId ~= nil
+end
+
+local function isSelectedUser(userId: number)
+	return userId ~= 0 and (userId == Selection.hostUserId or userId == Selection.cohostUserId)
+end
+
+-- ====== Local Toggles store ======
+local Toggles do
+	local state = {
+		levelEnabled = {[1]=false,[2]=false,[3]=false},
+		opt = { [2]={formations=false, chain=false}, [3]={formations=false, chain=false} },
+		selectedLevel = 0
+	}
+	Toggles = {}
+	function Toggles.IsEnabled(l) return state.levelEnabled[l] end
+	function Toggles.SetEnabled(l,v) state.levelEnabled[l]=v end
+	function Toggles.GetOption(l,k) return state.opt[l] and state.opt[l][k] end
+	function Toggles.SetOption(l,k,v)
+		state.opt[l] = state.opt[l] or {}
+		state.opt[l][k] = v
+		-- mutual exclusion inside a level
+		if v and k=="formations" and state.opt[l].chain then state.opt[l].chain=false end
+		if v and k=="chain" and state.opt[l].formations then state.opt[l].formations=false end
+	end
+	function Toggles.SetSelectedLevel(l) state.selectedLevel=l end
+end
+
+-- ----- Switch builder -----
+local function createSwitch(parent, initialOn, onChanged)
+	local switch = Instance.new("Frame")
+	switch.Name = "Switch"
+	switch.Parent = parent
+	switch.Size = UDim2.new(0, SWITCH_SIZE.X, 0, SWITCH_SIZE.Y)
+	switch.BackgroundColor3 = initialOn and Color3.fromRGB(0,200,0) or Color3.fromRGB(120,120,120)
+	switch.BorderSizePixel = 0
+	-- Ensure switch renders above row background/labels
+	switch.ZIndex = (parent and parent.ZIndex or 1) + 1
+	local corner = Instance.new("UICorner", switch); corner.CornerRadius = UDim.new(0,14)
+
+	local knob = Instance.new("Frame")
+	knob.Name = "Knob"
+	knob.Parent = switch
+	knob.Size = UDim2.new(0, SWITCH_SIZE.Y - 4, 0, SWITCH_SIZE.Y - 4)
+	knob.Position = initialOn and UDim2.new(1,-(SWITCH_SIZE.Y - 2),0,2) or UDim2.new(0,2,0,2)
+	knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
+	knob.BorderSizePixel = 0
+	knob.ZIndex = switch.ZIndex + 1
+	local knobCorner = Instance.new("UICorner", knob); knobCorner.CornerRadius = UDim.new(0,12)
+
+	local hitbox = Instance.new("TextButton")
+	hitbox.Name = "Hitbox"
+	hitbox.Parent = switch
+	hitbox.Size = UDim2.new(1,0,1,0)
+	hitbox.BackgroundTransparency = 1
+	hitbox.Text = ""
+	hitbox.ZIndex = switch.ZIndex
+
+	local state = initialOn
+	local function setState(v)
+		state = v
+		TweenService:Create(switch, TweenInfo.new(0.12), {
+			BackgroundColor3 = v and Color3.fromRGB(0,200,0) or Color3.fromRGB(120,120,120)
+		}):Play()
+		TweenService:Create(knob, TweenInfo.new(0.12), {
+			Position = v and UDim2.new(1,-(SWITCH_SIZE.Y - 2),0,2) or UDim2.new(0,2,0,2)
+		}):Play()
+		onChanged(v)
+	end
+
+	local function getState() return state end
+	local function setVisible(v) switch.Visible = v end
+
+	hitbox.Activated:Connect(function() setState(not state) end)
+
+	return { Set = setState, Get = getState, SetVisible = setVisible, Frame = switch }
+end
+
+-- Helpers
+local function textWidth(txt, size, font)
+	return TextService:GetTextSize(txt, size, font, Vector2.new(1000,100)).X
+end
+
+local function tagForPlayer(p: Player)
+	return "@" .. (p and p.Name or "?")
+end
+
+-- Always include LocalPlayer, even if Players:GetPlayers() hasn't listed them yet
+local function listPlayersInclSelf()
+	local list, seen = {}, {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		seen[p.UserId] = true
+		table.insert(list, p)
+	end
+	if localPlayer and not seen[localPlayer.UserId] then
+		table.insert(list, localPlayer)
+	end
+	return list
+end
+
+-- ----- UI root -----
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "CommandControlUI"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global -- ensure ZIndex works globally
+screenGui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
+
+-- Panel
+local panel = Instance.new("Frame")
+panel.Name = "Panel"
+panel.Parent = screenGui
+panel.Size = UDim2.new(0, EXPANDED_WIDTH, 0, PANEL_HEIGHT)
+panel.Position = UDim2.new(0, 20, 0, 200)
+panel.BackgroundColor3 = Color3.fromRGB(20,20,20)
+panel.BorderSizePixel = 0
+panel.ZIndex = 10
+panel.ClipsDescendants = false
+local panelCorner = Instance.new("UICorner", panel); panelCorner.CornerRadius = UDim.new(0,12)
+
+-- Title bar (draggable)
+local titleBar = Instance.new("Frame")
+titleBar.Name = "TitleBar"
+titleBar.Parent = panel
+titleBar.Size = UDim2.new(1, 0, 0, TITLEBAR_HEIGHT)
+titleBar.BackgroundColor3 = Color3.fromRGB(25,25,25)
+titleBar.BorderSizePixel = 0
+titleBar.ZIndex = 20
+local tbCorner = Instance.new("UICorner", titleBar); tbCorner.CornerRadius = UDim.new(0,12)
+
+-- Drag logic (hold mouse on the title bar)
+do
+	local dragging = false
+	local dragStart, startPos
+	titleBar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			dragStart = input.Position
+			startPos = panel.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then dragging = false end
+			end)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+			local delta = input.Position - dragStart
+			panel.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		end
+	end)
+end
+
+-- Centered title group (text + magnifying glass to the RIGHT of the text)
+local titleGroup = Instance.new("Frame")
+titleGroup.Name = "TitleGroup"
+titleGroup.Parent = titleBar
+titleGroup.BackgroundTransparency = 1
+titleGroup.ZIndex = 21
+local titleTextWidth = textWidth(TITLE_TEXT, TITLE_SIZE, TITLE_FONT)
+titleGroup.Size = UDim2.fromOffset(titleTextWidth + ICON_GAP + ICON_SIZE, TITLEBAR_HEIGHT)
+titleGroup.Position = UDim2.new(0.5, -math.floor((titleTextWidth + ICON_GAP + ICON_SIZE)/2), 0, 0)
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Name = "TitleLabel"
+titleLabel.Parent = titleGroup
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = TITLE_TEXT
+titleLabel.Font = TITLE_FONT
+titleLabel.TextSize = TITLE_SIZE
+titleLabel.TextColor3 = Color3.fromRGB(255,255,255)
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.TextYAlignment = Enum.TextYAlignment.Center
+titleLabel.Size = UDim2.fromOffset(titleTextWidth, TITLEBAR_HEIGHT)
+titleLabel.Position = UDim2.fromOffset(0, 0)
+titleLabel.ZIndex = 21
+
+-- Magnifying glass
+local glass = Instance.new("Frame")
+glass.Name = "Glass"
+glass.Parent = titleGroup
+glass.BackgroundTransparency = 1
+glass.Size = UDim2.fromOffset(ICON_SIZE, ICON_SIZE)
+glass.Position = UDim2.fromOffset(titleTextWidth + ICON_GAP, math.floor((TITLEBAR_HEIGHT - ICON_SIZE)/2))
+glass.ZIndex = 22
+
+local lens = Instance.new("Frame")
+lens.Name = "Lens"
+lens.Parent = glass
+lens.Size = UDim2.new(1,0,1,0)
+lens.Position = UDim2.new(0, 0, 0, -2) -- lens up by 2px
+lens.BackgroundTransparency = 1
+lens.ClipsDescendants = true
+lens.ZIndex = 22
+local lensCorner = Instance.new("UICorner", lens); lensCorner.CornerRadius = UDim.new(1,0)
+local lensStroke = Instance.new("UIStroke")
+lensStroke.Parent = lens
+lensStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+lensStroke.Color = Color3.fromRGB(255,255,255)
+lensStroke.Thickness = 2
+
+local handle = Instance.new("Frame")
+handle.Name = "Handle"
+handle.Parent = glass
+handle.BackgroundTransparency = 1
+handle.AnchorPoint = Vector2.new(0,0.5)
+handle.Rotation = 45
+handle.ZIndex = 22
+local handleCorner = Instance.new("UICorner", handle); handleCorner.CornerRadius = UDim.new(1,0)
+local handleStroke = Instance.new("UIStroke")
+handleStroke.Parent = handle
+handleStroke.Color = Color3.fromRGB(255,255,255)
+handleStroke.Thickness = 2
+
+local function placeHandle()
+	local g  = math.min(glass.AbsoluteSize.X, glass.AbsoluteSize.Y)
+	local r  = g/2
+	local cx = glass.AbsoluteSize.X/2
+	local cy = glass.AbsoluteSize.Y/2
+	local thickHandle = 2
+	local length = math.floor(g * 0.65)
+	handle.Size = UDim2.fromOffset(length, thickHandle)
+	handleStroke.Thickness = thickHandle
+	local out = r + (lensStroke.Thickness/2)
+	local off = out / math.sqrt(2)
+	local attachX = cx + off
+	local attachY = cy + off + 2 -- handle down 2px
+	handle.Position = UDim2.fromOffset(math.floor(attachX), math.floor(attachY))
+end
+placeHandle()
+glass:GetPropertyChangedSignal("AbsoluteSize"):Connect(placeHandle)
+
+-- Content root (now leaves space for bottom bar)
+local contentRoot = Instance.new("Frame")
+contentRoot.Name = "ContentRoot"
+contentRoot.Parent = panel
+contentRoot.BackgroundTransparency = 1
+contentRoot.Size = UDim2.new(1, 0, 1, -(TITLEBAR_HEIGHT + BOTTOMBAR_HEIGHT))
+contentRoot.Position = UDim2.new(0, 0, 0, TITLEBAR_HEIGHT)
+contentRoot.ZIndex = 14
+
+local padding = Instance.new("UIPadding")
+padding.Parent = contentRoot
+padding.PaddingLeft = UDim.new(0,10)
+padding.PaddingRight = UDim.new(0,10)
+padding.PaddingTop = UDim.new(0,CONTENT_TOP_PAD)
+padding.PaddingBottom = UDim.new(0,8)
+
+-- Sidebar
+local sidebar = Instance.new("Frame")
+sidebar.Name = "Sidebar"
+sidebar.Parent = contentRoot
+sidebar.Size = UDim2.new(0, SIDEBAR_WIDTH, 1, 0)
+sidebar.BackgroundColor3 = Color3.fromRGB(30,30,30)
+sidebar.BorderSizePixel = 0
+sidebar.ZIndex = 15
+local sbCorner = Instance.new("UICorner", sidebar); sbCorner.CornerRadius = UDim.new(0,8)
+
+local sbPad = Instance.new("UIPadding")
+sbPad.Parent = sidebar
+sbPad.PaddingTop = UDim.new(0,CONTENT_TOP_PAD)
+sbPad.PaddingLeft = UDim.new(0,8)
+sbPad.PaddingRight = UDim.new(0,8)
+
+local sbList = Instance.new("UIListLayout")
+sbList.Parent = sidebar
+sbList.SortOrder = Enum.SortOrder.LayoutOrder
+sbList.Padding = UDim.new(0,CONTENT_ITEM_GAP)
+
+-- Content area
+local content = Instance.new("Frame")
+content.Name = "Content"
+content.Parent = contentRoot
+content.Position = UDim2.new(0, SIDEBAR_WIDTH + 10, 0, 0)
+content.Size = UDim2.new(1, -(SIDEBAR_WIDTH + 10), 1, 0)
+content.BackgroundColor3 = Color3.fromRGB(28,28,28)
+content.BorderSizePixel = 0
+content.ZIndex = 15
+local ctCorner = Instance.new("UICorner", content); ctCorner.CornerRadius = UDim.new(0,8)
+local contentStroke = Instance.new("UIStroke")
+contentStroke.Parent = content
+contentStroke.Thickness = 1
+contentStroke.Color = Color3.fromRGB(50,50,50)
+contentStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+local contentList = Instance.new("UIListLayout")
+contentList.Parent = content
+contentList.SortOrder = Enum.SortOrder.LayoutOrder
+contentList.Padding = UDim.new(0,CONTENT_ITEM_GAP)
+
+-- ----- Global exclusivity (only one switch ON at a time) -----
+local levelSwitches = {}   -- [level] = {switchCtrls}
+local function turnOffAllExcept(exceptCtrl)
+	for _, list in pairs(levelSwitches) do
+		for _, ctrl in ipairs(list) do
+			if ctrl ~= exceptCtrl and ctrl.Get and ctrl.Get() then
+				ctrl.Set(false)
+			end
+		end
+	end
+end
+
+-- ----- Helpers to build rows -----
+local function makeRow()
+	local row = Instance.new("Frame")
+	row.Name = "Row"
+	row.Parent = content
+	row.Size = UDim2.new(1, 0, 0, ROW_HEIGHT)
+	row.BackgroundTransparency = 1
+	row.ZIndex = 15
+
+	local leftCol = Instance.new("Frame")
+	leftCol.Name = "LeftCol"
+	leftCol.Parent = row
+	leftCol.Size = UDim2.new(0, SWITCH_COL_WIDTH, 1, 0)
+	leftCol.BackgroundTransparency = 1
+	leftCol.ZIndex = 15
+
+	local rightCol = Instance.new("Frame")
+	rightCol.Name = "RightCol"
+	rightCol.Parent = row
+	rightCol.Position = UDim2.new(0, SWITCH_COL_WIDTH + 10, 0, 0)
+	rightCol.Size = UDim2.new(1, -(SWITCH_COL_WIDTH + 10), 1, 0)
+	rightCol.BackgroundTransparency = 1
+	rightCol.ZIndex = 15
+
+	return row, leftCol, rightCol
+end
+
+-- ----- Sidebar buttons (labels) -----
+local function addSidebarButton(labelText, order)
+	local button = Instance.new("TextButton")
+	button.Parent = sidebar
+	button.LayoutOrder = order
+	button.Size = UDim2.new(1, 0, 0, ROW_HEIGHT)
+	button.Text = labelText
+	button.TextColor3 = Color3.fromRGB(230,230,230)
+	button.Font = Enum.Font.Gotham
+	button.TextSize = 16
+	button.BackgroundColor3 = Color3.fromRGB(35,35,35)
+	button.AutoButtonColor = false
+	button.Selectable = false
+	button.Active = false
+	button.ZIndex = 16
+
+	local btnCorner = Instance.new("UICorner", button); btnCorner.CornerRadius = UDim.new(0,8)
+	local stroke = Instance.new("UIStroke")
+	stroke.Parent = button
+	stroke.Thickness = 2
+	stroke.Color = Color3.fromRGB(0,255,0)
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Transparency = 0
+end
+
+addSidebarButton("Pending Phase", 1)      -- Level 1
+addSidebarButton("Graduation Phase", 2)   -- Level 2
+addSidebarButton("Graduate Training", 3)  -- Level 3
+
+-- ----- Per-level contents (ALL visible) -----
+-- Pending Phase (Level 1)
+levelSwitches[1] = {}
+do
+	local _, leftCol, rightCol = makeRow()
+
+	local s1
+	s1 = createSwitch(leftCol, Toggles.IsEnabled(1), function(on)
+		Toggles.SetEnabled(1, on)
+		if on then turnOffAllExcept(s1) end
+	end)
+	s1.SetVisible(true)
+	s1.Frame.AnchorPoint = Vector2.new(0,0.5)
+	s1.Frame.Position = UDim2.new(0, FIRST_SWITCH_X, 0.74, 0)
+	table.insert(levelSwitches[1], s1)
+
+	local l1Label = Instance.new("TextLabel")
+	l1Label.Parent = leftCol
+	l1Label.BackgroundTransparency = 1
+	l1Label.Text = "Face Commands and Chain Commands"
+	l1Label.TextColor3 = Color3.fromRGB(200,200,200)
+	l1Label.Font = Enum.Font.Gotham
+	l1Label.TextSize = 14
+	l1Label.TextXAlignment = Enum.TextXAlignment.Left
+	l1Label.TextYAlignment = Enum.TextYAlignment.Center
+	l1Label.TextWrapped = true
+	l1Label.ZIndex = 16
+	local l1X = FIRST_SWITCH_X + SWITCH_SIZE.X + SWITCH_GAP
+	l1Label.Position = UDim2.new(0, l1X, 0.24, 0)
+	l1Label.Size = UDim2.new(0, SWITCH_COL_WIDTH - l1X, 1, 0)
+
+	local hotkeyNote = Instance.new("TextLabel")
+	hotkeyNote.Parent = rightCol
+	hotkeyNote.BackgroundTransparency = 1
+	hotkeyNote.Text = "H = Toggle"
+	hotkeyNote.TextColor3 = Color3.fromRGB(0, 255, 120)
+	hotkeyNote.Font = Enum.Font.GothamSemibold
+	hotkeyNote.TextSize = 14
+	hotkeyNote.TextXAlignment = Enum.TextXAlignment.Left
+	hotkeyNote.TextYAlignment = Enum.TextYAlignment.Center
+	hotkeyNote.Size = UDim2.new(0, 100, 1, 0)
+	hotkeyNote.ZIndex = 16
+end
+
+-- Graduation Phase (Level 2)
+levelSwitches[2] = {}
+do
+	local _, leftCol, _ = makeRow()
+	local sForm, sChain
+
+	sForm = createSwitch(leftCol, Toggles.GetOption(2, "formations"), function(on)
+		Toggles.SetOption(2, "formations", on)
+		if on then turnOffAllExcept(sForm) end
+	end)
+	sForm.SetVisible(true)
+	sForm.Frame.AnchorPoint = Vector2.new(0,0.5)
+	sForm.Frame.Position = UDim2.new(0, FIRST_SWITCH_X, 0.74, 0)
+	table.insert(levelSwitches[2], sForm)
+
+	local lblForm = Instance.new("TextLabel")
+	lblForm.Parent = leftCol
+	lblForm.BackgroundTransparency = 1
+	lblForm.Text = "Formations"
+	lblForm.TextColor3 = Color3.fromRGB(200,200,200)
+	lblForm.Font = Enum.Font.Gotham
+	lblForm.TextSize = 14
+	lblForm.TextXAlignment = Enum.TextXAlignment.Left
+	lblForm.TextYAlignment = Enum.TextYAlignment.Center
+	lblForm.Size = UDim2.new(0, FORM_LABEL_WIDTH, 1, 0)
+	lblForm.Position = UDim2.new(0, FIRST_SWITCH_X + SWITCH_SIZE.X + SWITCH_GAP, 0.24, 0)
+	lblForm.ZIndex = 16
+
+	local secondSwitchX = FIRST_SWITCH_X + SWITCH_SIZE.X + SWITCH_GAP + FORM_LABEL_WIDTH + LABEL_GAP + SECOND_SWITCH_SHIFT
+	sChain = createSwitch(leftCol, Toggles.GetOption(2, "chain"), function(on)
+		Toggles.SetOption(2, "chain", on)
+		if on then turnOffAllExcept(sChain) end
+	end)
+	sChain.SetVisible(true)
+	sChain.Frame.AnchorPoint = Vector2.new(0,0.5)
+	sChain.Frame.Position = UDim2.new(-0.1, secondSwitchX, 0.74, 0)
+	table.insert(levelSwitches[2], sChain)
+
+	local lblChain = Instance.new("TextLabel")
+	lblChain.Parent = leftCol
+	lblChain.BackgroundTransparency = 1
+	lblChain.Text = "Chain Commands"
+	lblChain.TextColor3 = Color3.fromRGB(200,200,200)
+	lblChain.Font = Enum.Font.Gotham
+	lblChain.TextSize = 14
+	lblChain.TextXAlignment = Enum.TextXAlignment.Left
+	lblChain.TextYAlignment = Enum.TextYAlignment.Center
+	lblChain.Size = UDim2.new(0, CHAIN_LABEL_WIDTH, 1, 0)
+	lblChain.Position = UDim2.new(-0.1, secondSwitchX + SWITCH_SIZE.X + SWITCH_GAP, 0.24, 0)
+	lblChain.ZIndex = 16
+end
+
+-- Graduate Training (Level 3)
+levelSwitches[3] = {}
+do
+	local _, leftCol, _ = makeRow()
+	local sForm, sChain
+
+	sForm = createSwitch(leftCol, Toggles.GetOption(3, "formations"), function(on)
+		Toggles.SetOption(3, "formations", on)
+		if on then turnOffAllExcept(sForm) end
+	end)
+	sForm.SetVisible(true)
+	sForm.Frame.AnchorPoint = Vector2.new(0,0.5)
+	sForm.Frame.Position = UDim2.new(0, FIRST_SWITCH_X, 0.74, 0)
+	table.insert(levelSwitches[3], sForm)
+
+	local lblForm = Instance.new("TextLabel")
+	lblForm.Parent = leftCol
+	lblForm.BackgroundTransparency = 1
+	lblForm.Text = "Formations"
+	lblForm.TextColor3 = Color3.fromRGB(200,200,200)
+	lblForm.Font = Enum.Font.Gotham
+	lblForm.TextSize = 14
+	lblForm.TextXAlignment = Enum.TextXAlignment.Left
+	lblForm.TextYAlignment = Enum.TextYAlignment.Center
+	lblForm.Size = UDim2.new(0, FORM_LABEL_WIDTH, 1, 0)
+	lblForm.Position = UDim2.new(0, FIRST_SWITCH_X + SWITCH_SIZE.X + SWITCH_GAP, 0.24, 0)
+	lblForm.ZIndex = 16
+
+	local secondSwitchX = FIRST_SWITCH_X + SWITCH_SIZE.X + SWITCH_GAP + FORM_LABEL_WIDTH + LABEL_GAP + SECOND_SWITCH_SHIFT
+	sChain = createSwitch(leftCol, Toggles.GetOption(3, "chain"), function(on)
+		Toggles.SetOption(3, "chain", on)
+		if on then turnOffAllExcept(sChain) end
+	end)
+	sChain.SetVisible(true)
+	sChain.Frame.AnchorPoint = Vector2.new(0,0.5)
+	sChain.Frame.Position = UDim2.new(-0.1, secondSwitchX, 0.74, 0)
+	table.insert(levelSwitches[3], sChain)
+
+	local lblChain = Instance.new("TextLabel")
+	lblChain.Parent = leftCol
+	lblChain.BackgroundTransparency = 1
+	lblChain.Text = "Chain Commands"
+	lblChain.TextColor3 = Color3.fromRGB(200,200,200)
+	lblChain.Font = Enum.Font.Gotham
+	lblChain.TextSize = 14
+	lblChain.TextXAlignment = Enum.TextXAlignment.Left
+	lblChain.TextYAlignment = Enum.TextYAlignment.Center
+	lblChain.Size = UDim2.new(0, CHAIN_LABEL_WIDTH, 1, 0)
+	lblChain.Position = UDim2.new(-0.1, secondSwitchX + SWITCH_SIZE.X + SWITCH_GAP, 0.24, 0)
+	lblChain.ZIndex = 16
+end
+
+-- =========================
+-- Bottom Host/Co-Host bar
+-- =========================
+local bottomBar = Instance.new("Frame")
+bottomBar.Name = "BottomBar"
+bottomBar.Parent = panel
+bottomBar.Size = UDim2.new(1, -20, 0, BOTTOMBAR_HEIGHT)
+bottomBar.Position = UDim2.new(0, 10, 1, -BOTTOMBAR_HEIGHT - 8)
+bottomBar.BackgroundColor3 = Color3.fromRGB(28,28,28)
+bottomBar.BorderSizePixel = 0
+bottomBar.ZIndex = 25
+bottomBar.ClipsDescendants = false
+local bbCorner = Instance.new("UICorner", bottomBar); bbCorner.CornerRadius = UDim.new(0,8)
+local bbStroke = Instance.new("UIStroke")
+bbStroke.Parent = bottomBar
+bbStroke.Thickness = 1
+bbStroke.Color = Color3.fromRGB(50,50,50)
+bbStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+local bbPad = Instance.new("UIPadding")
+bbPad.Parent = bottomBar
+bbPad.PaddingTop = UDim.new(0,8)
+bbPad.PaddingBottom = UDim.new(0,8)
+bbPad.PaddingLeft = UDim.new(0,10)
+bbPad.PaddingRight = UDim.new(0,10)
+
+-- Forward declarations to avoid nil in closures
+local refreshDropdownOptions -- function
+local hostDropdown, cohostDropdown -- dropdowns
+
+-- Simple dropdown builder (session only)
+local function createDropdown(parent, labelText, onSelected)
+	-- container (left or right half)
+	local holder = Instance.new("Frame")
+	holder.Name = labelText .. "_Holder"
+	holder.Parent = parent
+	holder.BackgroundTransparency = 1
+	holder.Size = UDim2.new(0.5, -6, 1, 0)
+	holder.ZIndex = 25
+
+	local col = Instance.new("UIListLayout")
+	col.Parent = holder
+	col.FillDirection = Enum.FillDirection.Vertical
+	col.Padding = UDim.new(0,4)
+	col.HorizontalAlignment = Enum.HorizontalAlignment.Left
+	col.SortOrder = Enum.SortOrder.LayoutOrder
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = "Label"
+	lbl.Parent = holder
+	lbl.BackgroundTransparency = 1
+	lbl.Text = labelText
+	lbl.TextColor3 = Color3.fromRGB(200,200,200)
+	lbl.Font = Enum.Font.Gotham
+	lbl.TextSize = 12
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.Size = UDim2.new(1, 0, 0, 14)
+	lbl.ZIndex = 26
+
+	local button = Instance.new("TextButton")
+	button.Name = "DropdownButton"
+	button.Parent = holder
+	button.Size = UDim2.new(1, 0, 0, 28)
+	button.Text = "— None —"
+	button.Font = Enum.Font.Gotham
+	button.TextSize = 14
+	button.TextColor3 = Color3.fromRGB(230,230,230)
+	button.BackgroundColor3 = Color3.fromRGB(35,35,35)
+	button.AutoButtonColor = true
+	button.ZIndex = 26
+	local bCorner = Instance.new("UICorner", button); bCorner.CornerRadius = UDim.new(0,8)
+	local bStroke = Instance.new("UIStroke")
+	bStroke.Parent = button
+	bStroke.Thickness = 1
+	bStroke.Color = Color3.fromRGB(70,70,70)
+	bStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+	-- options popup (appears upward from button)
+	local popup = Instance.new("Frame")
+	popup.Name = "Popup"
+	popup.Parent = holder
+	popup.Visible = false
+	popup.ZIndex = 100
+	popup.ClipsDescendants = false
+	popup.BackgroundColor3 = Color3.fromRGB(32,32,32)
+	popup.BorderSizePixel = 0
+	local pCorner = Instance.new("UICorner", popup); pCorner.CornerRadius = UDim.new(0,8)
+	local pStroke = Instance.new("UIStroke")
+	pStroke.Parent = popup
+	pStroke.Thickness = 1
+	pStroke.Color = Color3.fromRGB(70,70,70)
+	pStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+	-- Scroll area inside popup
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Parent = popup
+	scroll.BackgroundTransparency = 1
+	scroll.BorderSizePixel = 0
+	scroll.ScrollBarThickness = 4
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scroll.Size = UDim2.new(1, -8, 1, -8)
+	scroll.Position = UDim2.new(0, 4, 0, 4)
+	scroll.ZIndex = 101
+	local optionsList = Instance.new("UIListLayout")
+	optionsList.Parent = scroll
+	optionsList.SortOrder = Enum.SortOrder.LayoutOrder
+	optionsList.Padding = UDim.new(0,2)
+
+	-- state
+	local enabled = true
+	local currentUserId = nil
+	local options = {} -- { {userId=nil, label="— None —"}, ... }
+
+	-- helpers
+	local function setEnabled(v: boolean)
+		enabled = v
+		button.AutoButtonColor = v
+		button.Active = v
+		button.BackgroundColor3 = v and Color3.fromRGB(35,35,35) or Color3.fromRGB(24,24,24)
+		button.TextColor3 = v and Color3.fromRGB(230,230,230) or Color3.fromRGB(130,130,130)
+	end
+
+	local function closePopup() popup.Visible = false end
+	local function openPopup()
+		if not enabled then return end
+		-- size popup based on item count
+		local count = #options
+		local visible = math.min(count, DROPDOWN_MAX_VISIBLE)
+		local height = visible * DROPDOWN_ITEM_HEIGHT + 8
+		popup.Size = UDim2.new(1, 0, 0, height)
+		-- place above the button
+		popup.Position = UDim2.new(0, 0, 0, -height - 4)
+		popup.Visible = true
+	end
+
+	local function rebuildOptions()
+		-- clear
+		for _,child in ipairs(scroll:GetChildren()) do
+			if child:IsA("TextButton") then child:Destroy() end
+		end
+		-- add
+		for i,opt in ipairs(options) do
+			local optBtn = Instance.new("TextButton")
+			optBtn.Name = "Opt_"..i
+			optBtn.Parent = scroll
+			optBtn.Size = UDim2.new(1, 0, 0, DROPDOWN_ITEM_HEIGHT)
+			optBtn.TextXAlignment = Enum.TextXAlignment.Left
+			optBtn.Text = "  " .. opt.label
+			optBtn.Font = Enum.Font.Gotham
+			optBtn.TextSize = 14
+			optBtn.TextColor3 = Color3.fromRGB(230,230,230)
+			optBtn.BackgroundColor3 = Color3.fromRGB(40,40,40)
+			optBtn.AutoButtonColor = true
+			optBtn.ZIndex = 102
+			local oc = Instance.new("UICorner", optBtn); oc.CornerRadius = UDim.new(0,6)
+			optBtn.Activated:Connect(function()
+				currentUserId = opt.userId
+				button.Text = opt.label
+				closePopup()
+				onSelected(currentUserId) -- may be nil for None
+			end)
+		end
+		-- ensure scroll canvas fits after items added
+		scroll.CanvasSize = UDim2.new(0, 0, 0, optionsList.AbsoluteContentSize.Y)
+	end
+
+	button.Activated:Connect(function()
+		if popup.Visible then closePopup() else openPopup() end
+	end)
+
+	-- Clicking anywhere else closes popup
+	UserInputService.InputBegan:Connect(function(input, gp)
+		if gp then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			if popup.Visible then
+				closePopup()
+			end
+		end
+	end)
+
+	return {
+		Holder = holder,
+		Label = lbl,
+		Button = button,
+		Popup = popup,
+		SetEnabled = setEnabled,
+		SetOptions = function(list) options = list; rebuildOptions() end,
+		SetSelectedUserId = function(userId)
+			currentUserId = userId
+			-- match label
+			local label = "— None —"
+			for _,opt in ipairs(options) do
+				if opt.userId == userId then label = opt.label break end
+			end
+			button.Text = label
+		end,
+		GetSelectedUserId = function() return currentUserId end,
+		Close = closePopup,
+	}
+end
+
+-- Create dropdowns (using forward-declared locals)
+hostDropdown = createDropdown(bottomBar, "Host", function(userId)
+	-- Reset all states on role change
+	if userId ~= Selection.hostUserId then
+		if Highlighters and Highlighters._resetAllState then Highlighters._resetAllState() end
+	end
+
+	Selection.hostUserId = userId
+	-- Co-Host rules
+	if not Selection.hostUserId then
+		Selection.cohostUserId = nil
+		if cohostDropdown then
+			cohostDropdown.SetSelectedUserId(nil)
+			cohostDropdown.SetEnabled(false)
+		end
+	else
+		-- Keep any existing co-host if not equal host; otherwise clear
+		if Selection.cohostUserId == Selection.hostUserId then
+			Selection.cohostUserId = nil
+			if cohostDropdown then
+				cohostDropdown.SetSelectedUserId(nil)
+			end
+		end
+		if cohostDropdown then
+			cohostDropdown.SetEnabled(true)
+		end
+	end
+	-- Rebuild options to exclude/include appropriately
+	if refreshDropdownOptions then refreshDropdownOptions() end
+end)
+
+cohostDropdown = createDropdown(bottomBar, "Co-Host", function(userId)
+	Selection.cohostUserId = userId
+end)
+
+-- Position the two halves
+hostDropdown.Holder.Position = UDim2.new(0, 0, 0, 0)
+cohostDropdown.Holder.Position = UDim2.new(0.5, 6, 0, 0)
+
+-- Build option lists
+refreshDropdownOptions = function()
+	-- (Host) options: None + everyone (incl. LocalPlayer)
+	local hostOptions = { {userId=nil, label="— None —"} }
+	for _, p in ipairs(listPlayersInclSelf()) do
+		table.insert(hostOptions, {userId=p.UserId, label=tagForPlayer(p)})
+	end
+	hostDropdown.SetOptions(hostOptions)
+
+	-- (Co-Host) options: None + everyone except currently-selected Host
+	local coOptions = { {userId=nil, label="— None —"} }
+	for _, p in ipairs(listPlayersInclSelf()) do
+		if Selection.hostUserId ~= p.UserId then
+			table.insert(coOptions, {userId=p.UserId, label=tagForPlayer(p)})
+		end
+	end
+	cohostDropdown.SetOptions(coOptions)
+end
+
+-- Initial state
+refreshDropdownOptions()
+hostDropdown.SetSelectedUserId(Selection.hostUserId)
+cohostDropdown.SetSelectedUserId(Selection.cohostUserId)
+cohostDropdown.SetEnabled(false) -- disabled until Host selected
+task.defer(refreshDropdownOptions) -- ensure LocalPlayer appears even on first frame
+
+-- Live updates on join/leave + auto-promotion + state resets on role change
+Players.PlayerAdded:Connect(function()
+	refreshDropdownOptions()
+end)
+
+Players.PlayerRemoving:Connect(function(p)
+	local uid = p.UserId
+	if uid == Selection.cohostUserId then
+		Selection.cohostUserId = nil
+		cohostDropdown.SetSelectedUserId(nil)
+		refreshDropdownOptions()
+	elseif uid == Selection.hostUserId then
+		-- Promote Co-Host (if any) to Host, then clear Co-Host
+		if Highlighters and Highlighters._resetAllState then Highlighters._resetAllState() end
+		if Selection.cohostUserId then
+			Selection.hostUserId = Selection.cohostUserId
+			Selection.cohostUserId = nil
+			hostDropdown.SetSelectedUserId(Selection.hostUserId)
+			cohostDropdown.SetSelectedUserId(nil)
+			cohostDropdown.SetEnabled(false)
+		else
+			Selection.hostUserId = nil
+			hostDropdown.SetSelectedUserId(nil)
+			cohostDropdown.SetSelectedUserId(nil)
+			cohostDropdown.SetEnabled(false)
+		end
+		refreshDropdownOptions()
+	end
+end)
+
+-- Hotkey (ignore while typing)
+panel.Visible = START_OPEN
+UserInputService.InputBegan:Connect(function(input, gp)
+	if input.KeyCode == HOTKEY then
+		if gp then return end
+		if UserInputService:GetFocusedTextBox() ~= nil then return end
+		panel.Visible = not panel.Visible
+	end
+end)
+
+----------------------------------------------------------------
+-- === Chat Highlighter Dispatcher Wiring (attach to switches) ===
+----------------------------------------------------------------
+
+-- Single owner guard (prevent double handlers)
+_G.__CHAT_HANDLER_OWNER = _G.__CHAT_HANDLER_OWNER or nil
+local THIS_OWNER = "Loridex_Dispatcher"
+if _G.__CHAT_HANDLER_OWNER and _G.__CHAT_HANDLER_OWNER ~= THIS_OWNER then
+	warn("[Chat] Another OnIncomingMessage handler already set by:", _G.__CHAT_HANDLER_OWNER)
+else
+	_G.__CHAT_HANDLER_OWNER = THIS_OWNER
+end
+
+-- Registry / State Reset hooks
+local Highlighters = {}
+
+-- Prevent green→red (or green→plain) flicker when the same message is processed twice.
+local GREEN_ONCE_TTL = 1.0  -- seconds; short window is enough for duplicate passes
+local _greenOnce = {}       -- key = senderId .. "|" .. text  -> expiry clock()
+
+local function _mkKey(senderId, text) return tostring(senderId) .. "|" .. text end
+local function _markGreenOnce(senderId, text)
+	_greenOnce[_mkKey(senderId, text)] = os.clock() + GREEN_ONCE_TTL
+end
+local function _isGreenOnce(senderId, text)
+	local t = _greenOnce[_mkKey(senderId, text)]
+	return t ~= nil and os.clock() < t
+end
+
+local function _colorFirstToken(text, token, hex)
+	local s, e = string.find(text, token, 1, true)
+	if not s then return text end
+	return table.concat({
+		string.sub(text, 1, s-1),
+		'<font color="', hex, '">', token, '</font>',
+		string.sub(text, e+1)
+	})
+end
+
+----------------------------------------------------------------
+-- Level 3 → Formations (owner-locked red mode across Host/Co-Host)
+-- Adds "Misc" wrapper recognizer (tokens inside wrapper sentence).
+-- Wrapper rules:
+--   • First char uppercase; message ends with a period (space before period allowed).
+--   • No interior periods.
+--   • Only allowed capitals: first char of message; (optionally) first char of each token;
+--     SFL/STS must be ALL CAPS; any other uppercase elsewhere → invalid wrapper → whole line red.
+-- Tokens may be anywhere; commas may touch tokens; other touching punctuation invalidates that token.
+-- Multiple tokens allowed; highlight each valid token (token-only). After first MODE token in a line:
+--   • that MODE token = GREEN; all later tokens on the same line = RED.
+-- Mode tokens inside Misc DO start red-mode (owner = sender); this line stays token-colored (no flicker).
+-- While red-mode active, suppress Misc and paint entire line red (except owner Stop. per rules).
+----------------------------------------------------------------
+do
+	-- Red-mode state (owner-locked)
+	local state = { active = false, ownerUserId = nil }
+
+	-- Standalone triggers (exact-case with trailing period)
+	local TRIGGERS = { "Control face.", "Repel face.", "Imitate.", "Copy." }
+	local STOP = "Stop."
+
+	-- Misc token catalog (lowercase canonical)
+	local TOK_FACE = {
+		"right face","left face","right incline","left incline",
+		"about face","center face","centre face",
+	}
+	local TOK_FORM = {
+		"single file line","wedge","reverse wedge","box","diamond","column",
+		"staggered column","staggered line","shoulder to shoulder",
+	}
+	local TOK_MODE = { "control face","repel face","imitate","copy" } -- mode tokens (lowercase)
+	-- SFL / STS must be ALL CAPS in text to be valid
+	local SFL = "SFL"
+	local STS = "STS"
+
+	-- Build quick-lookup sets
+	local IS_MODE = {}
+	for _,t in ipairs(TOK_MODE) do IS_MODE[t]=true end
+
+	-- Current usernames (exact case). Always include LocalPlayer.
+	local function _getCurrentUsernames()
+		local names, seen = {}, {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			seen[p.UserId] = true
+			table.insert(names, p.Name)
+		end
+		if localPlayer and not seen[localPlayer.UserId] then
+			table.insert(names, localPlayer.Name)
+		end
+		return names
+	end
+
+	-- Helpers for wrapper parsing
+	local function _trimFinalPeriod(src)
+		-- Accept trailing spaces before/after final '.'; disallow interior '.'
+		local body = src:match("^(.-)%s*%.%s*$")
+		if not body then return nil end
+		if body:find("%.") then return nil end -- interior period not allowed
+		return body
+	end
+
+	local function _isUpper(ch) return ch:match("%u") ~= nil end
+	local function _isLetter(ch) return ch:match("%a") ~= nil end
+	local function _isSpace(ch) return ch:match("%s") ~= nil end
+
+	-- Check wrapper capitals:
+	--  - first non-space must be uppercase letter
+	--  - Any other uppercase must be explicitly "allowed" (we'll collect from tokens/usernames)
+	local function _firstNonSpaceIndex(s)
+		local i = 1
+		while i <= #s and _isSpace(s:sub(i,i)) do i += 1 end
+		return (i <= #s) and i or nil
+	end
+
+	-- Case validation for non-SFL/STS token substring vs its canonical lower form
+	local function _caseOK_for_normal_token(orig, canonLower)
+		if orig == canonLower then return true end
+		local first = orig:sub(1,1)
+		if first == first:upper() and orig:sub(2):lower() == canonLower:sub(2) then
+			-- Only the very first letter of the token is uppercase; rest lower
+			return true
+		end
+		return false
+	end
+
+	-- Surroundings check: commas may touch; otherwise only space or string boundary.
+	local function _touchOK(prevCh, nextCh)
+		local prevOK = (prevCh == nil) or _isSpace(prevCh) or (prevCh == ",")
+		-- NOTE: final period is removed from "body", so nextCh == '.' never occurs here
+		local nextOK = (nextCh == nil) or _isSpace(nextCh) or (nextCh == ",")
+		return prevOK and nextOK
+	end
+
+	-- Loose detector: does the string contain any known token (faces/forms/modes/SFL/STS) case-insensitively?
+	local function _hasAnyTokenLoose(s)
+		local ls = s:lower()
+		for _, canon in ipairs(TOK_FACE) do if ls:find(canon, 1, true) then return true end end
+		for _, canon in ipairs(TOK_FORM) do if ls:find(canon, 1, true) then return true end end
+		for _, canon in ipairs(TOK_MODE) do if ls:find(canon, 1, true) then return true end end
+		if ls:find("sfl", 1, true) or ls:find("sts", 1, true) then return true end
+		return false
+	end
+	local function _hasAnyQuotes(s)
+		return s:find('"', 1, true) or s:find("“", 1, true) or s:find("”", 1, true) or s:find("‘", 1, true) or s:find("’", 1, true)
+	end
+
+	-- Scan body for tokens (faces, formations, modes, SFL/STS, usernames)
+	-- Returns: matches, allowUpperMask, hasUserCaseMismatch
+	local function _scanMiscTokens(body)
+		local lower = body:lower()
+		local matches = {}   -- { {s,e,text,canon,isMode,kind} ... }  kind: "mode"|"face"|"form"|"sflsts"|"user"
+		local allowUpper = {} -- positions where uppercase is allowed (beyond first-char-of-message)
+		local hasUserCaseMismatch = false
+
+		local function allowUpperPos(pos) allowUpper[pos] = true end
+		local function allowUpperSpan(s,e) for i=s,e do allowUpper[i]=true end end
+
+		local function tryTokens(list, kind)
+			for _, canon in ipairs(list) do
+				local i = 1
+				while true do
+					local s = string.find(lower, canon, i, true)
+					if not s then break end
+					local e = s + #canon - 1
+					local orig = body:sub(s, e)
+
+					-- Surroundings: space or comma only
+					local prevCh = (s>1) and body:sub(s-1,s-1) or nil
+					local nextCh = (e<#body) and body:sub(e+1,e+1) or nil
+					local touchOK = _touchOK(prevCh, nextCh)
+
+					-- Case check (non-SFL/STS): all lower OR only first letter of token uppercase
+					local caseOK = _caseOK_for_normal_token(orig, canon)
+
+					if touchOK and caseOK then
+						table.insert(matches, {s=s, e=e, text=orig, canon=canon, isMode=(kind=="mode"), kind=kind})
+						-- If token text used initial uppercase, allow it at position s
+						if orig:sub(1,1):match("%u") then allowUpperPos(s) end
+					end
+
+					i = e + 1
+				end
+			end
+		end
+
+		-- Faces / formations / modes
+		tryTokens(TOK_MODE, "mode")
+		tryTokens(TOK_FACE, "face")
+		tryTokens(TOK_FORM, "form")
+
+		-- SFL / STS must be ALL CAPS in the body
+		local function tryAllCaps(tag)
+			local i = 1
+			while true do
+				local s = string.find(body, tag, i, true) -- exact-case only
+				if not s then break end
+				local e = s + #tag - 1
+				local prevCh = (s>1) and body:sub(s-1,s-1) or nil
+				local nextCh = (e<#body) and body:sub(e+1,e+1) or nil
+				if _touchOK(prevCh, nextCh) then
+					table.insert(matches, {s=s, e=e, text=tag, canon=tag:lower(), isMode=false, kind="sflsts"})
+					-- All letters uppercase allowed within SFL/STS
+					allowUpperSpan(s,e)
+				end
+				i = e + 1
+			end
+		end
+		tryAllCaps(SFL)
+		tryAllCaps(STS)
+
+		-- Usernames (exact-case valid, case-insensitive mismatch invalidates wrapper)
+		local usernames = _getCurrentUsernames()
+		for _, name in ipairs(usernames) do
+			-- 1) exact-case matches → token
+			local i = 1
+			while true do
+				local s = string.find(body, name, i, true)
+				if not s then break end
+				local e = s + #name - 1
+				local prevCh = (s>1) and body:sub(s-1,s-1) or nil
+				local nextCh = (e<#body) and body:sub(e+1,e+1) or nil
+				if _touchOK(prevCh, nextCh) then
+					table.insert(matches, {s=s, e=e, text=name, canon=name, isMode=false, kind="user"})
+					-- Entire username may have capitals; whitelist all positions
+					allowUpperSpan(s,e)
+				end
+				i = e + 1
+			end
+
+			-- 2) case-insensitive occurrences that are NOT exact-case → mismatch
+			local nameLower = name:lower()
+			local j = 1
+			while true do
+				local s = string.find(lower, nameLower, j, true)
+				if not s then break end
+				local e = s + #nameLower - 1
+				local orig = body:sub(s, e)
+				if orig ~= name then
+					local prevCh = (s>1) and body:sub(s-1,s-1) or nil
+					local nextCh = (e<#body) and body:sub(e+1,e+1) or nil
+					if _touchOK(prevCh, nextCh) then
+						hasUserCaseMismatch = true
+						break
+					end
+				end
+				j = e + 1
+			end
+			if hasUserCaseMismatch then break end
+		end
+
+		return matches, allowUpper, hasUserCaseMismatch
+	end
+
+	-- Render body with token coloring:
+	--   * usernames always GREEN
+	--   * tokens BEFORE first mode token = GREEN
+	--   * tokens AFTER first mode token = RED
+	local function _renderMiscColored(body, matches, tail)
+		table.sort(matches, function(a,b) return a.s < b.s end)
+		-- Pivot = first mode token position (if any)
+		local pivotPos = nil
+		for _,m in ipairs(matches) do
+			if m.isMode then pivotPos = m.s break end
+		end
+
+		local out, cursor = {}, 1
+		for _,m in ipairs(matches) do
+			if cursor < m.s then table.insert(out, body:sub(cursor, m.s - 1)) end
+			local color = "#00FF00" -- default green
+			if m.kind ~= "user" and pivotPos and m.s > pivotPos then
+				color = "#FF0000" -- tokens after first mode token are red
+			end
+			table.insert(out, '<font color="'); table.insert(out, color); table.insert(out, '">')
+			table.insert(out, m.text)
+			table.insert(out, '</font>')
+			cursor = m.e + 1
+		end
+		if cursor <= #body then table.insert(out, body:sub(cursor)) end
+
+		return table.concat(out) .. (tail or ".") , pivotPos ~= nil
+	end
+
+	-- Validate wrapper capitals against allowed positions
+	local function _wrapperCapsOK(body, matches, allowUpper)
+		local fn = _firstNonSpaceIndex(body)
+		if not fn then return false end
+		local ch = body:sub(fn,fn)
+		if not _isLetter(ch) or not _isUpper(ch) then
+			return false
+		end
+		-- Now scan for any other uppercase anywhere else; must be explicitly allowed
+		for i=1,#body do
+			if i ~= fn then
+				local c = body:sub(i,i)
+				if _isUpper(c) and not allowUpper[i] then
+					return false
+				end
+			end
+		end
+		return true
+	end
+
+	-- Reset hook
+	local function resetL3()
+		state.active = false
+		state.ownerUserId = nil
+	end
+
+	-- Force the correct colored display for THIS exact message (prevents flicker),
+	-- handling standalone triggers/Stop and valid Misc (wrapper) lines (with pivot + usernames).
+	local function _forceGreenDisplay(text)
+		-- Standalone triggers/Stop
+		for _, tok in ipairs(TRIGGERS) do
+			if string.find(text, tok, 1, true) then
+				return _colorFirstToken(text, tok, "#00FF00")
+			end
+		end
+		if string.find(text, STOP, 1, true) then
+			return _colorFirstToken(text, STOP, "#00FF00")
+		end
+
+		-- Valid Misc wrapper? Rebuild token-only colors with pivot rule + usernames always green.
+		local body = _trimFinalPeriod(text)
+		if body then
+			local tail = text:match("(%s*%.%s*)$") or "."
+			local matches, allowUpper, hasUserCaseMismatch = _scanMiscTokens(body)
+			if #matches > 0 and not hasUserCaseMismatch and _wrapperCapsOK(body, matches, allowUpper) then
+				local rendered = _renderMiscColored(body, matches, tail)
+				return rendered
+			end
+		end
+		return nil
+	end
+
+	Highlighters._resetL3Formations = resetL3
+
+	local function L3_Formations(text: string, senderUserId: number): string
+		-- If this exact message just toggled state, keep its colored rendering (prevents flicker)
+		if _isGreenOnce(senderUserId, text) then
+			local forced = _forceGreenDisplay(text)
+			if forced then return forced end
+		end
+
+		-- If red-mode is active → only owner can Stop.
+		if state.active then
+			if senderUserId == state.ownerUserId and string.find(text, STOP, 1, true) then
+				state.active = false
+				state.ownerUserId = nil
+				_markGreenOnce(senderUserId, text)
+				return _colorFirstToken(text, STOP, "#00FF00")
+			end
+			-- Suppress Misc highlighting while active
+			return '<font color="#FF0000">' .. text .. '</font>'
+		end
+
+		-- If this looks like a Misc attempt but has interior periods, treat as invalid Misc → whole line red
+		do
+			local periodCount = select(2, text:gsub("%.", ""))
+			if periodCount >= 2 and _hasAnyTokenLoose(text) then
+				return '<font color="#FF0000">' .. text .. '</font>'
+			end
+		end
+
+		-- ===== Not active: check for Misc wrapper with embedded commands =====
+		do
+			-- Must end with final period (space before ok) and have no interior periods
+			local body = _trimFinalPeriod(text)
+			if body then
+				-- Quotes around tokens → invalid Misc
+				if _hasAnyQuotes(body) and _hasAnyTokenLoose(body) then
+					return '<font color="#FF0000">' .. text .. '</font>'
+				end
+
+				local tail = text:match("(%s*%.%s*)$") or "."
+				local matches, allowUpper, hasUserCaseMismatch = _scanMiscTokens(body)
+				if #matches > 0 then
+					-- Username case mismatch → whole line invalid (red)
+					if hasUserCaseMismatch then
+						return '<font color="#FF0000">' .. text .. '</font>'
+					end
+
+					-- Wrapper capitals check (first char uppercase; no other capitals unless allowed by tokens/usernames)
+					if not _wrapperCapsOK(body, matches, allowUpper) then
+						return '<font color="#FF0000">' .. text .. '</font>'
+					end
+
+					-- Render with pivot rule (after-first-mode tokens red) + usernames always green
+					local renderedLine, hadMode = _renderMiscColored(body, matches, tail)
+
+					-- If any MODE token was present in this Misc line → start red-mode (owner=sender)
+					if hadMode then
+						state.active = true
+						state.ownerUserId = senderUserId
+						-- mark the ORIGINAL text for green-once cache (prevents repaint on duplicate pass)
+						_markGreenOnce(senderUserId, text)
+					end
+
+					return renderedLine
+				end
+
+				-- No valid tokens found. If it still *looks* like a Misc attempt (contains any known token loosely),
+				-- consider it an invalid Misc → whole line red. Otherwise, fall through to passive highlights.
+				if _hasAnyTokenLoose(body) then
+					return '<font color="#FF0000">' .. text .. '</font>'
+				end
+			end
+		end
+		-- ===== End Misc handling =====
+
+		-- Standalone exact-case triggers (as before)
+		for _, tok in ipairs(TRIGGERS) do
+			if string.find(text, tok, 1, true) then
+				state.active = true
+				state.ownerUserId = senderUserId
+				_markGreenOnce(senderUserId, text)
+				return _colorFirstToken(text, tok, "#00FF00")
+			end
+		end
+
+		-- Passive (normal) highlights when not in red mode and not a Misc
+		local t = text
+		t = t:gsub("(SFL%.?)", function(m)
+			if m == "SFL." then return '<font color="#FF0000">' .. m .. '</font>' end
+			if m == "SFL"  then return '<font color="#00FF00">' .. m .. '</font>' end
+			return m
+		end)
+		t = t:gsub("(STS%.?)", function(m)
+			if m == "STS." then return '<font color="#FF0000">' .. m .. '</font>' end
+			if m == "STS"  then return '<font color="#00FF00">' .. m .. '</font>' end
+			return m
+		end)
+		for _, phrase in ipairs({
+			"Single file line.","Wedge.","Reverse wedge.","Box.","Diamond.",
+			"Column.","Staggered column.","Staggered line.","Shoulder to shoulder.",
+			"Right face.","Left face.","Right incline.","Left incline.",
+			"About face.","Center face.","Centre face."
+			}) do
+			t = t:gsub(phrase, '<font color="#00FF00">' .. phrase .. '</font>')
+		end
+		return t
+	end
+
+	Highlighters.l3_formations = L3_Formations
+end
+
+
+----------------------------------------------------------------
+-- Shared command sets
+----------------------------------------------------------------
+local VALID_L1 = {
+	"right face","left face","right incline","left incline",
+	"about face","center face","centre face","stop",
+}
+local VALID_L1_SET = {}
+for _,v in ipairs(VALID_L1) do VALID_L1_SET[v]=true end
+
+local VALID_FULL_L2 = {
+	"right face","left face","right incline","left incline",
+	"about face","center face","centre face","stop",
+	"control face",
+}
+local VALID_FULL_L2_SET = {}
+for _,v in ipairs(VALID_FULL_L2) do VALID_FULL_L2_SET[v]=true end
+
+local VALID_FULL_L3 = {
+	"right face","left face","right incline","left incline",
+	"about face","center face","centre face","stop",
+	"control face","repel face","imitate","copy",
+}
+local VALID_FULL_L3_SET = {}
+for _,v in ipairs(VALID_FULL_L3) do VALID_FULL_L3_SET[v]=true end
+
+local CONTROL_L2 = { ["control face"]=true }
+local CONTROL_L3 = { ["control face"]=true, ["repel face"]=true, ["imitate"]=true, ["copy"]=true }
+
+local GREEN_OPEN, GREEN_CLOSE = '<font color="#00FF00">','</font>'
+local RED_OPEN, RED_CLOSE     = '<font color="#FF0000">','</font>'
+
+local function trimOuter(s) return (s:match("^%s*(.-)%s*$")) end
+
+----------------------------------------------------------------
+-- Level 1: Pending Phase (Face + Chain) — Selected-only
+----------------------------------------------------------------
+local function L1_Formatter(text: string, senderId: number): string
+	if not isSelectedUser(senderId) then return text end
+
+	-- Split by commas and periods, keep separators
+	local parts = {}
+	for seg, sep in text:gmatch("([^,.]*)([,.]?)") do
+		if seg ~= "" or sep ~= "" then
+			table.insert(parts, {seg = seg, sep = sep})
+		end
+	end
+
+	local out = {}
+	for _,chunk in ipairs(parts) do
+		local orig = chunk.seg
+		local trimmed = trimOuter(orig)
+		local lower = trimmed:lower()
+		local colored = orig
+
+		if trimmed ~= "" and VALID_L1_SET[lower] then
+			colored = GREEN_OPEN .. orig .. GREEN_CLOSE
+		end
+
+		table.insert(out, colored)
+		if chunk.sep ~= "" then table.insert(out, chunk.sep) end
+	end
+
+	return table.concat(out)
+end
+Highlighters.level1 = L1_Formatter
+
+----------------------------------------------------------------
+-- Level 2: Graduation Phase (Formations) — owner-locked red mode
+-- Exact-case "Control face." to start, owner-only "Stop." to end
+----------------------------------------------------------------
+----------------------------------------------------------------
+-- Level 2 → Formations (owner-locked red mode; exact-case start/stop)
+-- Start: "Control face."  End: "Stop."  No flicker.
+----------------------------------------------------------------
+do
+	local state = { active = false, ownerUserId = nil }
+	local START = "Control face."
+	local STOP  = "Stop."
+
+	local function resetL2()
+		state.active = false
+		state.ownerUserId = nil
+	end
+
+	local function L2_Formations(text: string, senderId: number): string
+		if not isSelectedUser(senderId) then
+			return text
+		end
+
+		-- Keep this specific message's token green if it toggled state.
+		if _isGreenOnce(senderId, text) then
+			if string.find(text, START, 1, true) then
+				return _colorFirstToken(text, START, "#00FF00")
+			elseif string.find(text, STOP, 1, true) then
+				return _colorFirstToken(text, STOP, "#00FF00")
+			end
+			return text
+		end
+
+		if not state.active then
+			if string.find(text, START, 1, true) then
+				state.active = true
+				state.ownerUserId = senderId
+				_markGreenOnce(senderId, text)
+				return _colorFirstToken(text, START, "#00FF00")
+			end
+
+			-- Passive (normal) highlights when not in red mode.
+			text = text:gsub("(SFL%.?)", function(m)
+				if m == "SFL." then return '<font color="#FF0000">' .. m .. '</font>' end
+				if m == "SFL"  then return '<font color="#00FF00">' .. m .. '</font>' end
+				return m
+			end)
+			text = text:gsub("(STS%.?)", function(m)
+				if m == "STS." then return '<font color="#FF0000">' .. m .. '</font>' end
+				if m == "STS"  then return '<font color="#00FF00">' .. m .. '</font>' end
+				return m
+			end)
+			for _, phrase in ipairs({
+				"Single file line.","Wedge.","Shoulder to shoulder.",
+				"Right face.","Left face.","Right incline.","Left incline.",
+				"About face.","Center face.","Centre face."
+				}) do
+				text = text:gsub(phrase, '<font color="#00FF00">' .. phrase .. '</font>')
+			end
+			return text
+		end
+
+		-- Active → only owner can Stop.
+		if senderId == state.ownerUserId and string.find(text, STOP, 1, true) then
+			state.active = false
+			state.ownerUserId = nil
+			_markGreenOnce(senderId, text)
+			return _colorFirstToken(text, STOP, "#00FF00")
+		end
+
+		return '<font color="#FF0000">' .. text .. '</font>'
+	end
+
+	Highlighters.l2_formations = L2_Formations
+	Highlighters._resetL2Formations = resetL2
+end
+
+----------------------------------------------------------------
+-- Level 2: Graduation Phase (Chain Commands) — Selected-only
+----------------------------------------------------------------
+local function L2_Chain(text: string, senderId: number): string
+	if not isSelectedUser(senderId) then return text end
+
+	local lower = text:lower()
+
+	local segs = {}
+	for part, sep in lower:gmatch("([^.,]*)([.,]?)") do
+		if part ~= "" or sep ~= "" then
+			table.insert(segs, {lowerPart=part, sep=sep})
+		end
+	end
+
+	local origSlices, segStart = {}, {}
+	local pos = 1
+	for i,seg in ipairs(segs) do
+		origSlices[i] = text:sub(pos, pos + #seg.lowerPart - 1)
+		segStart[i] = pos
+		pos += #seg.lowerPart
+		if seg.sep ~= "" then pos += 1 end
+	end
+
+	local function properCapVersion(s)
+		s = s:lower()
+		if #s==0 then return s end
+		return string.upper(s:sub(1,1)) .. s:sub(2)
+	end
+	local function isProperCapValid(tok)
+		for _,v in ipairs(VALID_FULL_L2) do
+			if tok == properCapVersion(v) then return v end
+		end
+		return nil
+	end
+	local function isLowerValid(tok)
+		return tok == tok:lower() and VALID_FULL_L2_SET[tok] == true
+	end
+	local function hasOneCommaBefore(startAbs)
+		local i = startAbs - 1
+		while i >= 1 and text:sub(i,i):match("%s") do i -= 1 end
+		if i < 1 then return true end
+		if text:sub(i,i) ~= "," then return false end
+		local j = i - 1
+		while j >= 1 and text:sub(j,j):match("%s") do j -= 1 end
+		if j < 1 then return true end
+		if text:sub(j,j):match("[%.,;!%?%-\"']") then return false end
+		return true
+	end
+
+	local pivot
+	for i=1,#segs do
+		local origSeg = origSlices[i]
+		local trimmed = trimOuter(origSeg)
+		if trimmed ~= "" then
+			local v = isProperCapValid(trimmed)
+			if v then
+				local lead = #origSeg:match("^(%s*)")
+				local startAbs = segStart[i] + lead
+				if hasOneCommaBefore(startAbs) then
+					pivot = i; break
+				end
+			end
+		end
+	end
+
+	local out, control = {}, false
+	for i, seg in ipairs(segs) do
+		local origSeg = origSlices[i]
+		local trimmed = trimOuter(origSeg)
+		local colored = origSeg
+
+		if pivot and i >= pivot and trimmed ~= "" then
+			local lead = #origSeg:match("^(%s*)")
+			local startAbs = segStart[i] + lead
+			local commaOK = hasOneCommaBefore(startAbs)
+
+			if i == pivot then
+				if commaOK then
+					local v = isProperCapValid(trimmed)
+					if v then
+						colored = GREEN_OPEN .. origSeg .. GREEN_CLOSE
+						if v == "control face" then control = true end
+						if v == "stop" then control = false end
+					end
+				end
+			else
+				if commaOK and isLowerValid(trimmed) then
+					if control then
+						if trimmed == "stop" then
+							colored = GREEN_OPEN .. origSeg .. GREEN_CLOSE
+							control = false
+						end
+					else
+						colored = GREEN_OPEN .. origSeg .. GREEN_CLOSE
+						if trimmed == "control face" then control = true end
+					end
+				end
+			end
+		end
+
+		table.insert(out, colored)
+		if seg.sep ~= "" then
+			local sepPos = segStart[i] + #origSlices[i]
+			table.insert(out, text:sub(sepPos, sepPos))
+		end
+	end
+
+	return table.concat(out)
+end
+Highlighters.l2_chain = L2_Chain
+
+----------------------------------------------------------------
+-- Level 3: Graduate Training (Chain Commands) — Selected-only
+----------------------------------------------------------------
+local function L3_Chain(text: string, senderId: number): string
+	if not isSelectedUser(senderId) then return text end
+
+	-- Punctuation allowed to touch AFTER a valid command (seals the token)
+	local PUNC = {
+		[","]=true,["."]=true,[";"]=true,["!"]=true,["?"]=true,
+		['"']=true,["'"]=true,[":"]=true,["’"]=true,["‘"]=true,["“"]=true,["”"]=true,
+		["/"]=true,
+		-- Hyphen / dash variants (treat ALL as punctuation, not barriers)
+		["-"]=true,["‐"]=true,["–"]=true,["—"]=true,["―"]=true,["‒"]=true,["﹘"]=true,
+	}
+	-- Hard barriers (reset punctuation to the right)
+	local BARRIER = {
+		["<"]=true,[">"]=true,["‹"]=true,["›"]=true,["("]=true,[")"]=true,
+		["["]=true,["]"]=true,["{"]=true,["}"]=true,["〈"]=true,["〉"]=true,
+	}
+
+	-- UTF-8 helpers
+	local function cp_iter_build(s: string)
+		local starts, chars, byStart = {}, {}, {}
+		local i = 1
+		while i <= #s do
+			local j = utf8.offset(s, 2, i) or (#s + 1)
+			local ch = s:sub(i, j - 1)
+			table.insert(starts, i)
+			table.insert(chars, ch)
+			byStart[i] = #starts
+			i = j
+		end
+		return starts, chars, byStart
+	end
+
+	local function isAsciiLetter(ch: string): boolean return ch:match("%a") ~= nil end
+	local function isSpace(ch: string): boolean return ch:match("%s") ~= nil end
+	local function isPunc(ch: string): boolean return PUNC[ch] == true end
+	local function isBarrierChar(ch: string): boolean return BARRIER[ch] == true end
+	local function isSpecial(ch: string): boolean
+		if isSpace(ch) or isAsciiLetter(ch) or isPunc(ch) then return false end
+		return true
+	end
+
+	local function trailHasDisallowed(trimmed: string, nextByteIdx: number): boolean
+		if nextByteIdx > #trimmed then return false end
+		local ch1 = trimmed:sub(nextByteIdx, nextByteIdx)
+		if ch1 == "<" or ch1 == ">" then return true end
+		local ahead4 = trimmed:sub(nextByteIdx, nextByteIdx + 3):lower()
+		if ahead4 == "&lt;" or ahead4 == "&gt;" then return true end
+		local cpStart = utf8.offset(trimmed, 0, nextByteIdx) or nextByteIdx
+		local cpEnd   = utf8.offset(trimmed, 2, cpStart) or (#trimmed + 1)
+		local ch      = trimmed:sub(cpStart, cpEnd - 1)
+		if isAsciiLetter(ch) then return true end
+		if isPunc(ch) or isSpace(ch) then return false end
+		return true
+	end
+
+	local function lastBarrierCpLeftOf(commaCp: number, chars): number
+		local i = commaCp - 1
+		while i >= 1 do
+			if ch == ";" then
+				if isEntitySemicolon(chars, i) then
+					return i -- treat entity ';' as a barrier point
+				end
+			end
+			if isBarrierChar(ch) or isSpecial(ch) then return i end
+			if ch == "," or ch == "." then return 0 end
+			i -= 1
+		end
+		return 0
+	end
+
+	-- Accept ';' that closes &gt; / &lt; / &amp; as "entity semicolon"
+	local function isEntitySemicolon(chars, idx: number): boolean
+		if not idx or chars[idx] ~= ";" then return false end
+
+		-- &gt; / &lt;  (3–char entities)
+		if idx >= 3 then
+			local a, b, c = chars[idx-3], chars[idx-2], chars[idx-1]
+			if a == "&" and (
+				((b == "g" or b == "G") and (c == "t" or c == "T")) or
+					((b == "l" or b == "L") and (c == "t" or c == "T"))
+				) then
+				return true
+			end
+		end
+
+		-- &amp;  (4–char entity)
+		if idx >= 4 then
+			local a, b, c, d = chars[idx-4], chars[idx-3], chars[idx-2], chars[idx-1]
+			if a == "&" and
+				((b == "a" or b == "A") and (c == "m" or c == "M") and (d == "p" or d == "P")) then
+				return true
+			end
+		end
+
+		return false
+	end
+
+
+	local function hasExactlyOneCommaBefore_L3(tokenStartAbs: number): boolean
+		-- Codepoint-aware scan: require a touching comma to the left of the token.
+		local starts, chars, byStart = cp_iter_build(text)
+		local tokenCp = byStart[tokenStartAbs]
+		if not tokenCp then return false end
+
+		-- Move left to last non-space; it must be the touching comma
+		local i = tokenCp - 1
+		while i >= 1 and isSpace(chars[i]) do i -= 1 end
+		if i < 1 or chars[i] ~= "," then return false end
+		local commaCp = i
+
+		-- Immediate-left-of-comma guard:
+		--  • If it's punctuation (incl. ';', '’', etc.) and NOT the ';' of &gt;/&lt;, reject
+		--  • If it's a special (like '&'), allow
+		local j = commaCp - 1
+		while j >= 1 and isSpace(chars[j]) do j -= 1 end
+		if j >= 1 then
+			local cj = chars[j]
+			-- Allow ampersand as a special/barrier even if it appears in PUNC by mistake
+			if cj == "&" then
+				return true
+			end
+			if j >= 1 and isPunc(chars[j]) and not isEntitySemicolon(chars, j) then
+				return false
+			end
+		end
+		return true
+	end
+
+
+	local function properCap(s: string): string s = s:lower(); if #s==0 then return s end; return string.upper(s:sub(1,1))..s:sub(2) end
+	local function isProperCapCommand(s: string): string?
+		for _, v in ipairs(VALID_FULL_L3) do if s == properCap(v) then return v end end
+		return nil
+	end
+	local function isAllLowerValid(s: string): boolean return s == s:lower() and VALID_FULL_L3_SET[s] == true end
+
+	local function extractLeadingToken(trimmed: string):(string, number, number)
+		if trimmed == "" or not trimmed:sub(1,1):match("%a") then return "", 0, 1 end
+		local i = 1
+		while i <= #trimmed do
+			local j = utf8.offset(trimmed, 2, i) or (#trimmed + 1)
+			local ch = trimmed:sub(i, j - 1)
+			if ch:match("%a") or ch:match("%s") then i = j else break end
+		end
+		local token = trimmed:sub(1, i - 1)
+		return token, (i - 1), i
+	end
+
+	local function colorTokenInSegment(origSeg: string, tokenLenInTrimmed: number): string
+		local lead = #origSeg:match("^(%s*)")
+		local s = lead + 1
+		local e = s + tokenLenInTrimmed - 1
+		if tokenLenInTrimmed <= 0 then return origSeg end
+		return table.concat({ origSeg:sub(1, s-1), '<font color="#00FF00">', origSeg:sub(s, e), '</font>', origSeg:sub(e+1) })
+	end
+
+	local segments = {}
+	for part, sep in text:gmatch("([^.,]*)([.,]?)") do
+		if part ~= "" or sep ~= "" then
+			table.insert(segments, {origPart = part, sep = sep})
+		end
+	end
+
+	local origSlices, segStart = {}, {}
+	do
+		local pos = 1
+		for i, seg in ipairs(segments) do
+			origSlices[i] = text:sub(pos, pos + #seg.origPart - 1)
+			segStart[i] = pos
+			pos += #seg.origPart
+			if seg.sep ~= "" then pos += 1 end
+		end
+	end
+
+	local function isStartOfLinePivot(tokenStartAbs: number): boolean
+		local i = tokenStartAbs - 1
+		while i >= 1 and text:sub(i,i):match("%s") do i -= 1 end
+		return i < 1
+	end
+
+	local pivot
+	for i = 1, #segments do
+		local origSeg = origSlices[i]
+		local trimmed = (origSeg:match("^%s*(.-)%s*$"))
+		if trimmed ~= "" then
+			local token, tokenLen, nextIdx = extractLeadingToken(trimmed)
+			if tokenLen > 0 and not trailHasDisallowed(trimmed, nextIdx) then
+				if isProperCapCommand(token) then
+					local leadSpaces = #origSeg:match("^(%s*)")
+					local startAbs = segStart[i] + leadSpaces
+					if hasExactlyOneCommaBefore_L3(startAbs) or isStartOfLinePivot(startAbs) then
+						pivot = i
+						break
+					end
+				end
+			end
+		end
+	end
+
+	local out, controlOn = {}, false
+	for i, seg in ipairs(segments) do
+		local origSeg = origSlices[i]
+		local trimmed = (origSeg:match("^%s*(.-)%s*$"))
+		local resultSeg = origSeg
+
+		if pivot and i >= pivot then
+			local leadSpaces = #origSeg:match("^(%s*)")
+			local startAbs = segStart[i] + leadSpaces
+			local commaOK = hasExactlyOneCommaBefore_L3(startAbs)
+
+			if (commaOK or (i == pivot and isStartOfLinePivot(startAbs))) and trimmed ~= "" then
+				local token, tokenLen, nextIdx = extractLeadingToken(trimmed)
+				if tokenLen > 0 and not trailHasDisallowed(trimmed, nextIdx) then
+					if i == pivot then
+						local cmdLower = isProperCapCommand(token)
+						if cmdLower then
+							if CONTROL_L3[cmdLower] then controlOn = true
+							elseif cmdLower == "stop" then controlOn = false end
+							resultSeg = colorTokenInSegment(origSeg, tokenLen)
+						end
+					else
+						-- Check the ORIGINAL token is all lowercase first (no internal capitals allowed)
+						if isAllLowerValid(token) then
+							local tokLower = token:lower()  -- now safe to use for set lookups
+							if controlOn then
+								if tokLower == "stop" then
+									resultSeg = colorTokenInSegment(origSeg, tokenLen)
+									controlOn = false
+								end
+							else
+								resultSeg = colorTokenInSegment(origSeg, tokenLen)
+								if CONTROL_L3[tokLower] then controlOn = true end
+							end
+						end
+					end
+				end
+			end
+		end
+
+		table.insert(out, resultSeg)
+		if seg.sep ~= "" then table.insert(out, seg.sep) end
+	end
+
+	return table.concat(out)
+end
+Highlighters.l3_chain = L3_Chain
+
+-- Global reset aggregator (used on role changes/promotions)
+Highlighters._resetAllState = function()
+	if Highlighters._resetL2Formations then Highlighters._resetL2Formations() end
+	if Highlighters._resetL3Formations then Highlighters._resetL3Formations() end
+end
+
+----------------------------------------------------------------
+-- Dispatcher: route to the active formatter based on toggles
+-- + Host/Co-Host gating
+----------------------------------------------------------------
+TextChatService.OnIncomingMessage = function(msg: TextChatMessage)
+	local p = Instance.new("TextChatMessageProperties")
+	local senderId = msg.TextSource and msg.TextSource.UserId or 0
+	local text = msg.Text
+
+	-- If no Host selected, do not highlight anyone
+	if not isHighlightingEnabled() then
+		p.Text = text
+		return p
+	end
+
+	-- Only process Host/Co-Host messages; pass others through untouched
+	if not isSelectedUser(senderId) then
+		p.Text = text
+		return p
+	end
+
+	-- Priority (only one should be on due to UI exclusivity)
+	if Toggles.IsEnabled(1) and Highlighters.level1 then
+		p.Text = Highlighters.level1(text, senderId); return p
+	end
+	if Toggles.GetOption(2, "formations") and Highlighters.l2_formations then
+		p.Text = Highlighters.l2_formations(text, senderId); return p
+	end
+	if Toggles.GetOption(2, "chain") and Highlighters.l2_chain then
+		p.Text = Highlighters.l2_chain(text, senderId); return p
+	end
+	if Toggles.GetOption(3, "formations") and Highlighters.l3_formations then
+		p.Text = Highlighters.l3_formations(text, senderId); return p
+	end
+	if Toggles.GetOption(3, "chain") and Highlighters.l3_chain then
+		p.Text = Highlighters.l3_chain(text, senderId); return p
+	end
+
+	p.Text = text
+	return p
+end
