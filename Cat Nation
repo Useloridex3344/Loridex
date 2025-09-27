@@ -907,7 +907,7 @@ end
 
 ----------------------------------------------------------------
 -- Level 3 → Formations (owner-locked red mode across Host/Co-Host)
--- Adds "Misc" wrapper recognizer (tokens inside wrapper sentence).
+-- Misc wrapper recognizer (tokens inside wrapper sentence).
 -- Wrapper rules:
 --   • First char uppercase; message ends with a period (space before period allowed).
 --   • No interior periods.
@@ -1119,11 +1119,29 @@ do
 		return matches, allowUpper, hasUserCaseMismatch
 	end
 
+	-- Drop nested sub-matches like "wedge" inside "reverse wedge"
+	local function _filterOverlapping(matches)
+		table.sort(matches, function(a,b)
+			if a.s ~= b.s then return a.s < b.s else return a.e > b.e end
+		end)
+		local res, lastE = {}, 0
+		for _, m in ipairs(matches) do
+			if m.s > lastE then
+				table.insert(res, m)
+				lastE = m.e
+			end
+		end
+		return res
+	end
+
 	-- Render body with token coloring:
 	--   * usernames always GREEN
 	--   * tokens BEFORE first mode token = GREEN
 	--   * tokens AFTER first mode token = RED
 	local function _renderMiscColored(body, matches, tail)
+		-- Ensure no overlapping shorter tokens (e.g., "wedge" inside "reverse wedge")
+		matches = _filterOverlapping(matches)
+
 		table.sort(matches, function(a,b) return a.s < b.s end)
 		-- Pivot = first mode token position (if any)
 		local pivotPos = nil
@@ -1310,7 +1328,6 @@ do
 
 	Highlighters.l3_formations = L3_Formations
 end
-
 
 ----------------------------------------------------------------
 -- Shared command sets
