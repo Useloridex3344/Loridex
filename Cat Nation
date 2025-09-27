@@ -392,7 +392,7 @@ local function addSidebarButton(labelText, order)
 	button.Text = labelText
 	button.TextColor3 = Color3.fromRGB(230,230,230)
 	button.Font = Enum.Font.Gotham
-	button.TextSize = 16
+	button.TextSize = 13
 	button.BackgroundColor3 = Color3.fromRGB(35,35,35)
 	button.AutoButtonColor = false
 	button.Selectable = false
@@ -434,7 +434,7 @@ do
 	l1Label.Text = "Face Commands and Chain Commands"
 	l1Label.TextColor3 = Color3.fromRGB(200,200,200)
 	l1Label.Font = Enum.Font.Gotham
-	l1Label.TextSize = 14
+	l1Label.TextSize = 12
 	l1Label.TextXAlignment = Enum.TextXAlignment.Left
 	l1Label.TextYAlignment = Enum.TextYAlignment.Center
 	l1Label.TextWrapped = true
@@ -477,7 +477,7 @@ do
 	lblForm.Text = "Formations"
 	lblForm.TextColor3 = Color3.fromRGB(200,200,200)
 	lblForm.Font = Enum.Font.Gotham
-	lblForm.TextSize = 14
+	lblForm.TextSize = 12
 	lblForm.TextXAlignment = Enum.TextXAlignment.Left
 	lblForm.TextYAlignment = Enum.TextYAlignment.Center
 	lblForm.Size = UDim2.new(0, FORM_LABEL_WIDTH, 1, 0)
@@ -500,7 +500,7 @@ do
 	lblChain.Text = "Chain Commands"
 	lblChain.TextColor3 = Color3.fromRGB(200,200,200)
 	lblChain.Font = Enum.Font.Gotham
-	lblChain.TextSize = 14
+	lblChain.TextSize = 12
 	lblChain.TextXAlignment = Enum.TextXAlignment.Left
 	lblChain.TextYAlignment = Enum.TextYAlignment.Center
 	lblChain.Size = UDim2.new(0, CHAIN_LABEL_WIDTH, 1, 0)
@@ -529,7 +529,7 @@ do
 	lblForm.Text = "Formations"
 	lblForm.TextColor3 = Color3.fromRGB(200,200,200)
 	lblForm.Font = Enum.Font.Gotham
-	lblForm.TextSize = 14
+	lblForm.TextSize = 12
 	lblForm.TextXAlignment = Enum.TextXAlignment.Left
 	lblForm.TextYAlignment = Enum.TextYAlignment.Center
 	lblForm.Size = UDim2.new(0, FORM_LABEL_WIDTH, 1, 0)
@@ -552,7 +552,7 @@ do
 	lblChain.Text = "Chain Commands"
 	lblChain.TextColor3 = Color3.fromRGB(200,200,200)
 	lblChain.Font = Enum.Font.Gotham
-	lblChain.TextSize = 14
+	lblChain.TextSize = 12
 	lblChain.TextXAlignment = Enum.TextXAlignment.Left
 	lblChain.TextYAlignment = Enum.TextYAlignment.Center
 	lblChain.Size = UDim2.new(0, CHAIN_LABEL_WIDTH, 1, 0)
@@ -625,7 +625,7 @@ local function createDropdown(parent, labelText, onSelected)
 	button.Size = UDim2.new(1, 0, 0, 28)
 	button.Text = "— None —"
 	button.Font = Enum.Font.Gotham
-	button.TextSize = 14
+	button.TextSize = 12
 	button.TextColor3 = Color3.fromRGB(230,230,230)
 	button.BackgroundColor3 = Color3.fromRGB(35,35,35)
 	button.AutoButtonColor = true
