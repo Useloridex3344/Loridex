@@ -92,7 +92,6 @@ local function createSwitch(parent, initialOn, onChanged)
 	switch.Size = UDim2.new(0, SWITCH_SIZE.X, 0, SWITCH_SIZE.Y)
 	switch.BackgroundColor3 = initialOn and Color3.fromRGB(0,200,0) or Color3.fromRGB(120,120,120)
 	switch.BorderSizePixel = 0
-	-- Ensure switch renders above row background/labels
 	switch.ZIndex = (parent and parent.ZIndex or 1) + 1
 	local corner = Instance.new("UICorner", switch); corner.CornerRadius = UDim.new(0,14)
 
@@ -115,7 +114,23 @@ local function createSwitch(parent, initialOn, onChanged)
 	hitbox.ZIndex = switch.ZIndex
 
 	local state = initialOn
+	local enabled = true
+
+	local function refreshVisual()
+		-- when disabled, force a “grayed” track and dim knob
+		if enabled then
+			switch.BackgroundColor3 = state and Color3.fromRGB(0,200,0) or Color3.fromRGB(120,120,120)
+			knob.BackgroundColor3   = Color3.fromRGB(255,255,255)
+		else
+			switch.BackgroundColor3 = Color3.fromRGB(60,60,60)
+			knob.BackgroundColor3   = Color3.fromRGB(190,190,190)
+		end
+		-- keep knob position reflecting state
+		knob.Position = state and UDim2.new(1,-(SWITCH_SIZE.Y - 2),0,2) or UDim2.new(0,2,0,2)
+	end
+
 	local function setState(v)
+		if not enabled then return end
 		state = v
 		TweenService:Create(switch, TweenInfo.new(0.12), {
 			BackgroundColor3 = v and Color3.fromRGB(0,200,0) or Color3.fromRGB(120,120,120)
@@ -128,10 +143,28 @@ local function createSwitch(parent, initialOn, onChanged)
 
 	local function getState() return state end
 	local function setVisible(v) switch.Visible = v end
+	local function setEnabled(v)
+		enabled = v
+		hitbox.Active = v
+		hitbox.AutoButtonColor = v
+		refreshVisual()
+	end
 
-	hitbox.Activated:Connect(function() setState(not state) end)
+	hitbox.Activated:Connect(function()
+		if not enabled then return end
+		setState(not state)
+	end)
 
-	return { Set = setState, Get = getState, SetVisible = setVisible, Frame = switch }
+	-- draw initial
+	refreshVisual()
+
+	return {
+		Set = setState,
+		Get = getState,
+		SetVisible = setVisible,
+		SetEnabled = setEnabled,
+		Frame = switch,
+	}
 end
 
 -- Helpers
@@ -160,6 +193,7 @@ end
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "CommandControlUI"
 screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global -- ensure ZIndex works globally
 screenGui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
 
@@ -206,6 +240,102 @@ do
 		end
 	end)
 end
+
+-- ==== Mode Activated HUD (Level 3 only) ====
+local ModeHUD do
+	ModeHUD = {}
+
+	-- Container
+	local hud = Instance.new("Frame")
+	hud.Name = "ModeActivatedHUD"
+	hud.Parent = screenGui
+	hud.AnchorPoint = Vector2.new(0.5, 0)
+	hud.Position = UDim2.new(0.5, 0, 0, 2)   -- top-center, slight margin
+	hud.Size = UDim2.fromOffset(420, 96)
+	hud.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+	hud.BorderSizePixel = 0
+	hud.Visible = false
+	hud.ZIndex = 50
+	local hudCorner = Instance.new("UICorner", hud); hudCorner.CornerRadius = UDim.new(0, 10)
+	local hudStroke = Instance.new("UIStroke", hud); hudStroke.Thickness = 2; hudStroke.Color = Color3.fromRGB(255, 60, 60)
+	local hudPad = Instance.new("UIPadding", hud); hudPad.PaddingLeft = UDim.new(0, 12); hudPad.PaddingRight = UDim.new(0, 12)
+	hudPad.PaddingTop = UDim.new(0, 10); hudPad.PaddingBottom = UDim.new(0, 10)
+
+	-- Avatar
+	local avatar = Instance.new("ImageLabel")
+	avatar.Name = "Avatar"
+	avatar.Parent = hud
+	avatar.AnchorPoint = Vector2.new(0, 0.5)
+	avatar.Position = UDim2.new(0, 12, 0.5, 0)
+	avatar.Size = UDim2.fromOffset(64, 64)
+	avatar.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	avatar.BorderSizePixel = 0
+	avatar.ZIndex = 51
+	local avCorner = Instance.new("UICorner", avatar); avCorner.CornerRadius = UDim.new(1, 0)
+
+	-- Label
+	local label = Instance.new("TextLabel")
+	label.Name = "Text"
+	label.Parent = hud
+	label.BackgroundTransparency = 1
+	label.Position = UDim2.new(0, 12 + 64 + 12, 0, 0)
+	label.Size = UDim2.new(1, -(12 + 64 + 12 + 12), 1, 0)
+	label.TextColor3 = Color3.fromRGB(235, 235, 235)
+	label.Font = Enum.Font.BuilderSans
+	label.TextSize = 11
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.TextYAlignment = Enum.TextYAlignment.Center
+	label.RichText = true
+	label.ZIndex = 51
+
+	local function canonicalModeDisplay(canonLower: string): string
+		if canonLower == "control face" then return "Control face" end
+		if canonLower == "repel face"   then return "Repel face"   end
+		if canonLower == "imitate"      then return "Imitate"      end
+		if canonLower == "copy"         then return "Copy"         end
+		return canonLower
+	end
+
+	local currentTween
+	function ModeHUD.Show(ownerUserId: number, canonLower: string)
+		local disp = canonicalModeDisplay(canonLower)
+		local p = Players:GetPlayerByUserId(ownerUserId)
+		local username = p and p.Name or ("UserId "..tostring(ownerUserId))
+
+		label.Text = string.format('<b>%s</b> has been activated by <font color="#00FF00">@%s</font>.', disp, username)
+
+		-- Fetch avatar headshot (best-effort)
+		local ok, url = pcall(function()
+			local u, _ = Players:GetUserThumbnailAsync(ownerUserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size420x420)
+			return u
+		end)
+		avatar.Image = ok and url or ""
+
+		-- Fade in
+		hud.Visible = true
+		hud.BackgroundTransparency = 1
+		label.TextTransparency = 1
+		avatar.ImageTransparency = 1
+		if currentTween then currentTween:Cancel() end
+		currentTween = TweenService:Create(hud, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundTransparency = 0})
+		currentTween:Play()
+		TweenService:Create(label, TweenInfo.new(0.18), {TextTransparency = 0}):Play()
+		TweenService:Create(avatar, TweenInfo.new(0.18), {ImageTransparency = 0}):Play()
+	end
+
+	function ModeHUD.Hide()
+		if not hud.Visible then return end
+		if currentTween then currentTween:Cancel() end
+		local t1 = TweenService:Create(hud, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {BackgroundTransparency = 1})
+		local t2 = TweenService:Create(label, TweenInfo.new(0.15), {TextTransparency = 1})
+		local t3 = TweenService:Create(avatar, TweenInfo.new(0.15), {ImageTransparency = 1})
+		t1:Play(); t2:Play(); t3:Play()
+		task.delay(0.22, function() hud.Visible = false end)
+	end
+end
+-- ==== /Mode Activated HUD ====
+
+
 
 -- Centered title group (text + magnifying glass to the RIGHT of the text)
 local titleGroup = Instance.new("Frame")
@@ -344,8 +474,58 @@ contentList.Parent = content
 contentList.SortOrder = Enum.SortOrder.LayoutOrder
 contentList.Padding = UDim.new(0,CONTENT_ITEM_GAP)
 
--- ----- Global exclusivity (only one switch ON at a time) -----
 local levelSwitches = {}   -- [level] = {switchCtrls}
+
+-- === Switch Interlock: blocks clicks until a Host is selected ===
+local switchInterlock = Instance.new("TextButton")
+switchInterlock.Name = "SwitchInterlock"
+switchInterlock.Parent = content
+switchInterlock.ZIndex = 100     -- ensure it sits above switches
+switchInterlock.AutoButtonColor = false
+switchInterlock.Selectable = false
+switchInterlock.Text = ""
+switchInterlock.BackgroundColor3 = Color3.fromRGB(20,20,20)
+switchInterlock.BackgroundTransparency = 0.35  -- set to 1 if you want it invisible
+switchInterlock.BorderSizePixel = 0
+switchInterlock.Size = UDim2.new(1, 0, 1, 0)
+switchInterlock.Visible = false                -- starts ON (no Host yet)
+
+local interlockMsg = Instance.new("TextLabel")
+interlockMsg.Name = "Prompt"
+interlockMsg.Parent = switchInterlock
+interlockMsg.BackgroundTransparency = 1
+interlockMsg.Text = "Select a Host to enable controls"
+interlockMsg.Font = Enum.Font.BuilderSans
+interlockMsg.TextSize = 14
+interlockMsg.TextColor3 = Color3.fromRGB(235,235,235)
+interlockMsg.TextTransparency = 0.05
+interlockMsg.AnchorPoint = Vector2.new(0.5, 0.5)
+interlockMsg.Position = UDim2.new(0.5, 0, 0.5, 0)
+interlockMsg.Size = UDim2.new(1, -24, 0, 22)
+
+-- Helper used by the Host dropdown callback
+local function updateSwitchInterlock()
+	-- we’re not using the overlay anymore; keep it hidden
+	if switchInterlock then switchInterlock.Visible = false end
+
+	-- enable only when a Host is chosen
+	local allow = (Selection and Selection.hostUserId ~= nil)
+
+	-- guard in case this is called before switches are created
+	if type(levelSwitches) ~= "table" then return end
+
+	for _, list in pairs(levelSwitches) do
+		if type(list) == "table" then
+			for _, ctrl in ipairs(list) do
+				if ctrl and ctrl.SetEnabled then
+					ctrl.SetEnabled(allow)
+				end
+			end
+		end
+	end
+end
+
+-- ----- Global exclusivity (only one switch ON at a time) -----
 local function turnOffAllExcept(exceptCtrl)
 	for _, list in pairs(levelSwitches) do
 		for _, ctrl in ipairs(list) do
@@ -720,6 +900,7 @@ local function createDropdown(parent, labelText, onSelected)
 				button.Text = opt.label
 				closePopup()
 				onSelected(currentUserId) -- may be nil for None
+				updateSwitchInterlock()   -- reflect new Host state if this is the Host dropdown
 			end)
 		end
 		-- ensure scroll canvas fits after items added
@@ -825,6 +1006,7 @@ hostDropdown.SetSelectedUserId(Selection.hostUserId)
 cohostDropdown.SetSelectedUserId(Selection.cohostUserId)
 cohostDropdown.SetEnabled(false) -- disabled until Host selected
 task.defer(refreshDropdownOptions) -- ensure LocalPlayer appears even on first frame
+updateSwitchInterlock()           -- lock switches until Host is chosen
 
 -- Live updates on join/leave + auto-promotion + state resets on role change
 Players.PlayerAdded:Connect(function()
@@ -853,6 +1035,7 @@ Players.PlayerRemoving:Connect(function(p)
 			cohostDropdown.SetEnabled(false)
 		end
 		refreshDropdownOptions()
+		updateSwitchInterlock() -- reflect new Host state after promotion/clear
 	end
 end)
 
@@ -1190,6 +1373,7 @@ do
 	local function resetL3()
 		state.active = false
 		state.ownerUserId = nil
+		ModeHUD.Hide()
 	end
 
 	-- Force the correct colored display for THIS exact message (prevents flicker),
@@ -1232,6 +1416,7 @@ do
 			if senderUserId == state.ownerUserId and string.find(text, STOP, 1, true) then
 				state.active = false
 				state.ownerUserId = nil
+				ModeHUD.Hide()
 				_markGreenOnce(senderUserId, text)
 				return _colorFirstToken(text, STOP, "#00FF00")
 			end
@@ -1277,10 +1462,22 @@ do
 					if hadMode then
 						state.active = true
 						state.ownerUserId = senderUserId
+
+						-- Find the first mode token's canonical lower name to show (e.g., "control face")
+						local firstModeCanonLower
+						for _, m in ipairs(matches) do
+							if m.isMode then
+								firstModeCanonLower = m.canon  -- already lower-case canonical from scanner
+								break
+							end
+						end
+						if firstModeCanonLower then
+							ModeHUD.Show(senderUserId, firstModeCanonLower)
+						end
+
 						-- mark the ORIGINAL text for green-once cache (prevents repaint on duplicate pass)
 						_markGreenOnce(senderUserId, text)
 					end
-
 					return renderedLine
 				end
 
@@ -1298,6 +1495,11 @@ do
 			if string.find(text, tok, 1, true) then
 				state.active = true
 				state.ownerUserId = senderUserId
+
+				-- tok is like "Control face." → strip trailing period and lower for canonical
+				local canonLower = tok:sub(1, #tok - 1):lower()
+				ModeHUD.Show(senderUserId, canonLower)
+
 				_markGreenOnce(senderUserId, text)
 				return _colorFirstToken(text, tok, "#00FF00")
 			end
@@ -1643,21 +1845,6 @@ local function L3_Chain(text: string, senderId: number): string
 		return true
 	end
 
-	local function lastBarrierCpLeftOf(commaCp: number, chars): number
-		local i = commaCp - 1
-		while i >= 1 do
-			if ch == ";" then
-				if isEntitySemicolon(chars, i) then
-					return i -- treat entity ';' as a barrier point
-				end
-			end
-			if isBarrierChar(ch) or isSpecial(ch) then return i end
-			if ch == "," or ch == "." then return 0 end
-			i -= 1
-		end
-		return 0
-	end
-
 	-- Accept ';' that closes &gt; / &lt; / &amp; as "entity semicolon"
 	local function isEntitySemicolon(chars, idx: number): boolean
 		if not idx or chars[idx] ~= ";" then return false end
@@ -1685,7 +1872,6 @@ local function L3_Chain(text: string, senderId: number): string
 		return false
 	end
 
-
 	local function hasExactlyOneCommaBefore_L3(tokenStartAbs: number): boolean
 		-- Codepoint-aware scan: require a touching comma to the left of the token.
 		local starts, chars, byStart = cp_iter_build(text)
@@ -1705,7 +1891,7 @@ local function L3_Chain(text: string, senderId: number): string
 		while j >= 1 and isSpace(chars[j]) do j -= 1 end
 		if j >= 1 then
 			local cj = chars[j]
-			-- Allow ampersand as a special/barrier even if it appears in PUNC by mistake
+			-- Allow ampersand as special/barrier
 			if cj == "&" then
 				return true
 			end
@@ -1715,7 +1901,6 @@ local function L3_Chain(text: string, senderId: number): string
 		end
 		return true
 	end
-
 
 	local function properCap(s: string): string s = s:lower(); if #s==0 then return s end; return string.upper(s:sub(1,1))..s:sub(2) end
 	local function isProperCapCommand(s: string): string?
