@@ -347,17 +347,28 @@ local Outline do
 	}
 
 	-- Classic Chat 8-color palette + name-hash (matches default chat color)
+	-- === Username → 8-color chat palette (uses Player.Name, NOT DisplayName) ===
 	local NAME_COLORS = {
-		Color3.fromRGB(196,  40,  28),
-		Color3.fromRGB( 13, 105, 172),
-		Color3.fromRGB( 39,  70,  45),
-		Color3.fromRGB(245, 205,  48),
+		-- 1 red      #fd2943
+		Color3.fromRGB(253,  41,  67),
+		-- 2 blue     #01a2ff
+		Color3.fromRGB(  1, 162, 255),
+		-- 3 green    #02b857
+		Color3.fromRGB(  2, 184,  87),
+		-- 4 alder    #b480ff
+		Color3.fromRGB(180, 128, 255),
+		-- 5 orange   #da8541
 		Color3.fromRGB(218, 133,  65),
-		Color3.fromRGB(163,  75,  75),
-		Color3.fromRGB(193, 105, 197),
-		Color3.fromRGB( 27,  42,  53),
+		-- 6 yellow   #f5cd30
+		Color3.fromRGB(245, 205,  48),
+		-- 7 pink     #e8bac8
+		Color3.fromRGB(232, 186, 200),
+		-- 8 beige    #d7c59a
+		Color3.fromRGB(215, 197, 154),
 	}
-	local function classicNameHash(pName: string): number
+
+	-- Same hashing Roblox classic chat uses (deterministic per *username*)
+	local function usernameHash(pName: string): number
 		local value, len = 0, #pName
 		for i = 1, len do
 			local c = string.byte(pName, i)
@@ -368,10 +379,12 @@ local Outline do
 		end
 		return value
 	end
-	local function getClassicChatColorForName(pName: string): Color3
-		local idx = (math.abs(classicNameHash(pName)) % #NAME_COLORS) + 1
+
+	local function getChatColorForUsername(pName: string): Color3
+		local idx = (math.abs(usernameHash(pName)) % #NAME_COLORS) + 1
 		return NAME_COLORS[idx]
 	end
+
 
 	local function destroyBundle(b)
 		if not b then return end
@@ -423,7 +436,7 @@ local Outline do
 		-- Replace existing
 		destroyForUser(userId)
 
-		local col = getClassicChatColorForName(plr.Name)
+		local col = getChatColorForUsername(plr.Name) -- username-based color
 		local bundle = { head = nil, boxes = {} }
 
 		-- Inside attachOne(userId), replace the whole "3D edges..." section + keep head block
