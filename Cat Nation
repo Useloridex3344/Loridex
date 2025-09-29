@@ -335,6 +335,163 @@ local ModeHUD do
 end
 -- ==== /Mode Activated HUD ====
 
+-- ==== Host/Co-Host 3D Outline (Z toggle) ====
+local Outline do
+	Outline = {
+		enabled = false,
+		perUser = {},    -- [userId] = { head: Highlight?, boxes: SelectionBox[] }
+		charConns = {},  -- [userId] = RBXScriptConnection (CharacterAdded)
+	}
+
+	-- Classic Chat 8-color palette + name-hash (matches default chat color)
+	local NAME_COLORS = {
+		Color3.fromRGB(196,  40,  28),
+		Color3.fromRGB( 13, 105, 172),
+		Color3.fromRGB( 39,  70,  45),
+		Color3.fromRGB(245, 205,  48),
+		Color3.fromRGB(218, 133,  65),
+		Color3.fromRGB(163,  75,  75),
+		Color3.fromRGB(193, 105, 197),
+		Color3.fromRGB( 27,  42,  53),
+	}
+	local function classicNameHash(pName: string): number
+		local value, len = 0, #pName
+		for i = 1, len do
+			local c = string.byte(pName, i)
+			local reverseIndex = len - i + 1
+			if (len % 2) == 1 then reverseIndex -= 1 end
+			if (reverseIndex % 4) >= 2 then c = -c end
+			value += c
+		end
+		return value
+	end
+	local function getClassicChatColorForName(pName: string): Color3
+		local idx = (math.abs(classicNameHash(pName)) % #NAME_COLORS) + 1
+		return NAME_COLORS[idx]
+	end
+
+	local function destroyBundle(b)
+		if not b then return end
+		if b.head then pcall(function() b.head:Destroy() end) end
+		if b.boxes then
+			for _, sb in ipairs(b.boxes) do pcall(function() sb:Destroy() end) end
+		end
+	end
+	local function destroyForUser(userId: number)
+		local b = Outline.perUser[userId]
+		if b then
+			Outline.perUser[userId] = nil
+			destroyBundle(b)
+		end
+	end
+	
+	-- Gather all character BaseParts except Head, HumanoidRootPart, and accessory parts
+	local function collectBodyParts(char: Model): {BasePart}
+		local parts = {}
+		for _, inst in ipairs(char:GetDescendants()) do
+			if inst:IsA("BasePart") then
+				local n = inst.Name
+				if n ~= "Head" and n ~= "HumanoidRootPart" and not inst:IsDescendantOf(char:FindFirstChildOfClass("Accessory") or Instance.new("Folder")) then
+					table.insert(parts, inst)
+				end
+			end
+		end
+		-- If nothing found (unlikely), try classic R6 names as a fallback
+		if #parts == 0 then
+			for _, n in ipairs({"Torso","Left Arm","Right Arm","Left Leg","Right Leg"}) do
+				local p = char:FindFirstChild(n)
+				if p and p:IsA("BasePart") then table.insert(parts, p) end
+			end
+		end
+		return parts
+	end
+
+	-- Build wireframe SelectionBoxes for R6 blocky parts; 2D head outline via Highlight
+	local R6_PARTS = { "Torso","Left Arm","Right Arm","Left Leg","Right Leg" } -- head is handled separately
+	local function attachOne(userId: number)
+		if not Outline.enabled or not userId then return end
+		local plr = Players:GetPlayerByUserId(userId)
+		if not plr then return end
+		local char = plr.Character
+		if not char or not char.Parent then return end
+
+		-- Replace existing
+		destroyForUser(userId)
+
+		local col = getClassicChatColorForName(plr.Name)
+		local bundle = { head = nil, boxes = {} }
+
+		-- 3D edges for blocky limbs/torso  (REPLACE THIS WHOLE LOOP)
+		for _, part in ipairs(collectBodyParts(char)) do
+			local h2 = Instance.new("Highlight")
+			h2.Name = "LoridexBodyOutline_" .. part.Name
+			h2.Adornee = part
+			h2.DepthMode = Enum.HighlightDepthMode.Occluded  -- no through-walls
+			h2.FillTransparency = 1                           -- outline only
+			h2.OutlineTransparency = 0
+			h2.OutlineColor = col
+			h2.Parent = char
+			table.insert(bundle.boxes, h2) -- we keep using 'boxes' as the storage array
+		end
+
+		-- 2D head silhouette (always on top)
+		local head = char:FindFirstChild("Head")
+		if head and head:IsA("BasePart") then
+			local h = Instance.new("Highlight")
+			h.Name = "LoridexHeadOutline"
+			h.Adornee = head
+			h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+			h.FillTransparency = 1      -- no fill/tint
+			h.OutlineTransparency = 0.0 -- crisp
+			h.OutlineColor = col
+			h.Parent = char
+			bundle.head = h
+		end
+
+		Outline.perUser[userId] = bundle
+	end
+
+	local function ensureCharWatcher(userId: number)
+		if Outline.charConns[userId] then return end
+		local plr = Players:GetPlayerByUserId(userId)
+		if not plr then return end
+		Outline.charConns[userId] = plr.CharacterAdded:Connect(function(_newChar)
+			if Outline.enabled then task.defer(function() attachOne(userId) end) end
+		end)
+	end
+	local function clearUnusedWatchers()
+		for uid, conn in pairs(Outline.charConns) do
+			if uid ~= Selection.hostUserId and uid ~= Selection.cohostUserId then
+				Outline.charConns[uid] = nil
+				pcall(function() conn:Disconnect() end)
+			end
+		end
+	end
+
+	function Outline.Refresh()
+		-- remove for unselected/disabled
+		for uid, _ in pairs(Outline.perUser) do
+			if not Outline.enabled or (uid ~= Selection.hostUserId and uid ~= Selection.cohostUserId) then
+				destroyForUser(uid)
+			end
+		end
+		clearUnusedWatchers()
+		if not Outline.enabled then return end
+
+		-- attach for current selections
+		for _, uid in ipairs({Selection.hostUserId, Selection.cohostUserId}) do
+			if uid then
+				ensureCharWatcher(uid)
+				attachOne(uid)
+			end
+		end
+	end
+
+	function Outline.Enable()  Outline.enabled = true;  Outline.Refresh() end
+	function Outline.Disable() Outline.enabled = false; Outline.Refresh() end
+	function Outline.Toggle()  if Outline.enabled then Outline.Disable() else Outline.Enable() end end
+end
+-- ==== /Host/Co-Host 3D Outline ====
 
 
 -- Centered title group (text + magnifying glass to the RIGHT of the text)
@@ -634,6 +791,20 @@ do
 	hotkeyNote.TextYAlignment = Enum.TextYAlignment.Center
 	hotkeyNote.Size = UDim2.new(0, 100, 1, 0)
 	hotkeyNote.ZIndex = 16
+	
+	-- Add second line hint for Z key
+	local zNote = Instance.new("TextLabel")
+	zNote.Parent = rightCol
+	zNote.BackgroundTransparency = 1
+	zNote.Text = "Z = Host outline"
+	zNote.TextColor3 = Color3.fromRGB(0, 255, 120)
+	zNote.Font = Enum.Font.GothamSemibold
+	zNote.TextSize = 14
+	zNote.TextXAlignment = Enum.TextXAlignment.Left
+	zNote.TextYAlignment = Enum.TextYAlignment.Center
+	zNote.Size = UDim2.new(0, 160, 1, 0)
+	zNote.Position = UDim2.new(-0.45, 0, 0, 18) -- a bit below the H line
+	zNote.ZIndex = 16
 end
 
 -- Graduation Phase (Level 2)
@@ -950,6 +1121,7 @@ hostDropdown = createDropdown(bottomBar, "Host", function(userId)
 	end
 
 	Selection.hostUserId = userId
+
 	-- Co-Host rules
 	if not Selection.hostUserId then
 		Selection.cohostUserId = nil
@@ -969,12 +1141,19 @@ hostDropdown = createDropdown(bottomBar, "Host", function(userId)
 			cohostDropdown.SetEnabled(true)
 		end
 	end
-	-- Rebuild options to exclude/include appropriately
+
+	-- Rebuild lists and refresh outlines
 	if refreshDropdownOptions then refreshDropdownOptions() end
+	Outline.Refresh()
+
+	-- Update switch enable/disable (gray until host chosen)
+	updateSwitchInterlock()
 end)
 
 cohostDropdown = createDropdown(bottomBar, "Co-Host", function(userId)
 	Selection.cohostUserId = userId
+	-- Refresh outlines so Co-Host gets/loses highlight immediately
+	Outline.Refresh()
 end)
 
 -- Position the two halves
@@ -1006,11 +1185,11 @@ hostDropdown.SetSelectedUserId(Selection.hostUserId)
 cohostDropdown.SetSelectedUserId(Selection.cohostUserId)
 cohostDropdown.SetEnabled(false) -- disabled until Host selected
 task.defer(refreshDropdownOptions) -- ensure LocalPlayer appears even on first frame
-updateSwitchInterlock()           -- lock switches until Host is chosen
 
 -- Live updates on join/leave + auto-promotion + state resets on role change
 Players.PlayerAdded:Connect(function()
 	refreshDropdownOptions()
+	Outline.Refresh()
 end)
 
 Players.PlayerRemoving:Connect(function(p)
@@ -1035,8 +1214,10 @@ Players.PlayerRemoving:Connect(function(p)
 			cohostDropdown.SetEnabled(false)
 		end
 		refreshDropdownOptions()
-		updateSwitchInterlock() -- reflect new Host state after promotion/clear
 	end
+	Outline.Refresh()
+	-- keep switch enabled state in sync if host was cleared
+	updateSwitchInterlock()
 end)
 
 -- Hotkey (ignore while typing)
@@ -1046,6 +1227,18 @@ UserInputService.InputBegan:Connect(function(input, gp)
 		if gp then return end
 		if UserInputService:GetFocusedTextBox() ~= nil then return end
 		panel.Visible = not panel.Visible
+	end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gp)
+	if gp then return end
+	if input.KeyCode == Enum.KeyCode.Z then
+		-- Only meaningful if at least one of Host/Co-Host is selected
+		if Selection.hostUserId or Selection.cohostUserId then
+			if UserInputService:GetFocusedTextBox() == nil then
+				Outline.Toggle()
+			end
+		end
 	end
 end)
 
