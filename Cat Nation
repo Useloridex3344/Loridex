@@ -335,6 +335,9 @@ local ModeHUD do
 end
 -- ==== /Mode Activated HUD ====
 
+-- Outline thickness (lower = thinner). ~0.02–0.06 is a good range.
+local BODY_LINE_THICKNESS = 0.035
+
 -- ==== Host/Co-Host 3D Outline (Z toggle) ====
 local Outline do
 	Outline = {
@@ -384,19 +387,21 @@ local Outline do
 			destroyBundle(b)
 		end
 	end
-	
+
 	-- Gather all character BaseParts except Head, HumanoidRootPart, and accessory parts
+	-- Replaces your current collectBodyParts(char)
 	local function collectBodyParts(char: Model): {BasePart}
 		local parts = {}
 		for _, inst in ipairs(char:GetDescendants()) do
-			if inst:IsA("BasePart") then
-				local n = inst.Name
-				if n ~= "Head" and n ~= "HumanoidRootPart" and not inst:IsDescendantOf(char:FindFirstChildOfClass("Accessory") or Instance.new("Folder")) then
-					table.insert(parts, inst)
-				end
+			if inst:IsA("BasePart")
+				and inst.Name ~= "Head"
+				and inst.Name ~= "HumanoidRootPart"
+				and inst:FindFirstAncestorOfClass("Accessory") == nil
+			then
+				table.insert(parts, inst)
 			end
 		end
-		-- If nothing found (unlikely), try classic R6 names as a fallback
+		-- Fallback for R6 in case streaming hasn't delivered descendants yet
 		if #parts == 0 then
 			for _, n in ipairs({"Torso","Left Arm","Right Arm","Left Leg","Right Leg"}) do
 				local p = char:FindFirstChild(n)
@@ -421,17 +426,59 @@ local Outline do
 		local col = getClassicChatColorForName(plr.Name)
 		local bundle = { head = nil, boxes = {} }
 
-		-- 3D edges for blocky limbs/torso  (REPLACE THIS WHOLE LOOP)
-		for _, part in ipairs(collectBodyParts(char)) do
-			local h2 = Instance.new("Highlight")
-			h2.Name = "LoridexBodyOutline_" .. part.Name
-			h2.Adornee = part
-			h2.DepthMode = Enum.HighlightDepthMode.Occluded  -- no through-walls
-			h2.FillTransparency = 1                           -- outline only
-			h2.OutlineTransparency = 0
-			h2.OutlineColor = col
-			h2.Parent = char
-			table.insert(bundle.boxes, h2) -- we keep using 'boxes' as the storage array
+		-- Inside attachOne(userId), replace the whole "3D edges..." section + keep head block
+		-- (keep your existing header, col, bundle, and head highlight code as-is)
+
+		-- 3D edges for blocky limbs/torso using SelectionBox (most reliable in R6)
+		local function attachBodyBoxes()
+			local bodyParts = collectBodyParts(char)
+			for _, part in ipairs(bodyParts) do
+				local sb = Instance.new("SelectionBox")
+				sb.Name = "LoridexWire_" .. part.Name
+				sb.Adornee = part
+				sb.Color3 = col
+				sb.LineThickness = BODY_LINE_THICKNESS
+				sb.SurfaceTransparency = 1
+				sb.Visible = true
+				sb.Parent = part       -- parent to the part = fewer culling hiccups
+				table.insert(bundle.boxes, sb)
+			end
+		end
+
+		attachBodyBoxes()
+
+		-- If the rig hasn’t fully streamed yet (no parts found), try once more shortly
+		if not bundle.boxes or #bundle.boxes == 0 then
+			task.delay(0.25, function()
+				-- still selected and feature on?
+				if Outline.enabled and (userId == Selection.hostUserId or userId == Selection.cohostUserId) then
+					-- rebuild (in case the character changed in-between)
+					local freshChar = plr.Character
+					if freshChar and freshChar.Parent then
+						-- clear and try again
+						destroyForUser(userId)
+						-- re-create bundle and head outline
+						local newBundle = { head = nil, boxes = {} }
+						-- head
+						local head2 = freshChar:FindFirstChild("Head")
+						if head2 and head2:IsA("BasePart") then
+							local h = Instance.new("Highlight")
+							h.Name = "LoridexHeadOutline"
+							h.Adornee = head2
+							h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+							h.FillTransparency = 1
+							h.OutlineTransparency = 0
+							h.OutlineColor = col
+							h.Parent = freshChar
+							newBundle.head = h
+						end
+						-- body
+						bundle = newBundle
+						attachBodyBoxes()
+						Outline.perUser[userId] = bundle
+					end
+				end
+			end)
 		end
 
 		-- 2D head silhouette (always on top)
@@ -791,7 +838,7 @@ do
 	hotkeyNote.TextYAlignment = Enum.TextYAlignment.Center
 	hotkeyNote.Size = UDim2.new(0, 100, 1, 0)
 	hotkeyNote.ZIndex = 16
-	
+
 	-- Add second line hint for Z key
 	local zNote = Instance.new("TextLabel")
 	zNote.Parent = rightCol
