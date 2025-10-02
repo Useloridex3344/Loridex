@@ -173,8 +173,16 @@ local function textWidth(txt, size, font)
 end
 
 local function tagForPlayer(p: Player)
-	return "@" .. (p and p.Name or "?")
+	if not p then return "@?" end
+	local uname = p.Name or "?"
+	local dname = p.DisplayName or ""
+	if dname ~= "" and dname ~= uname then
+		return string.format("%s (@%s)", dname, uname)  
+	else
+		return "@" .. uname                              -- fallback to @Username
+	end
 end
+
 
 -- Always include LocalPlayer, even if Players:GetPlayers() hasn't listed them yet
 local function listPlayersInclSelf()
@@ -348,24 +356,18 @@ local Outline do
 
 	-- Classic Chat 8-color palette + name-hash (matches default chat color)
 	-- === Username → 8-color chat palette (uses Player.Name, NOT DisplayName) ===
+	-- Classic 8-color chat palette (TextChatService era: Bright violet → Alder)
 	local NAME_COLORS = {
-		-- 1 red      #fd2943
-		Color3.fromRGB(253,  41,  67),
-		-- 2 blue     #01a2ff
-		Color3.fromRGB(  1, 162, 255),
-		-- 3 green    #02b857
-		Color3.fromRGB(  2, 184,  87),
-		-- 4 alder    #b480ff
-		Color3.fromRGB(180, 128, 255),
-		-- 5 orange   #da8541
-		Color3.fromRGB(218, 133,  65),
-		-- 6 yellow   #f5cd30
-		Color3.fromRGB(245, 205,  48),
-		-- 7 pink     #e8bac8
-		Color3.fromRGB(232, 186, 200),
-		-- 8 beige    #d7c59a
-		Color3.fromRGB(215, 197, 154),
+		Color3.fromRGB(253,  41,  67), -- 1 Bright red
+		Color3.fromRGB(  1, 162, 255), -- 2 Bright blue
+		Color3.fromRGB(  2, 184,  87), -- 3 Earth green
+		BrickColor.new("Alder").Color,  -- 4 Alder (replaces Bright violet)
+		BrickColor.new("Bright orange").Color, -- 5 Bright orange
+		BrickColor.new("Bright yellow").Color, -- 6 Bright yellow
+		BrickColor.new("Light reddish violet").Color, -- 7 Pink
+		BrickColor.new("Brick yellow").Color,  -- 8 Beige
 	}
+
 
 	-- Same hashing Roblox classic chat uses (deterministic per *username*)
 	local function usernameHash(pName: string): number
@@ -380,8 +382,10 @@ local Outline do
 		return value
 	end
 
+	-- AFTER (matches Classic Chat exactly)
 	local function getChatColorForUsername(pName: string): Color3
-		local idx = (math.abs(usernameHash(pName)) % #NAME_COLORS) + 1
+		local h = usernameHash(pName)
+		local idx = ((h % #NAME_COLORS) + #NAME_COLORS) % #NAME_COLORS + 1
 		return NAME_COLORS[idx]
 	end
 
@@ -2278,6 +2282,8 @@ Highlighters._resetAllState = function()
 	if Highlighters._resetL2Formations then Highlighters._resetL2Formations() end
 	if Highlighters._resetL3Formations then Highlighters._resetL3Formations() end
 end
+
+
 
 ----------------------------------------------------------------
 -- Dispatcher: route to the active formatter based on toggles
